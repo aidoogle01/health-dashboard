@@ -1,27 +1,38 @@
 // Health dashboard client. Renders /api/dashboard into four views and re-renders
 // whenever the server pushes an `update` event (a sync finished) over /api/stream.
+//
+// The layout follows the UX research in reports/Health dashboard UX and Oura design.md:
+// one main focus first, every number against your own usual range, forgiving
+// weekly goals, and insights that show how sure they are.
 
 import {
   DEFAULT_GOALS,
+  EXPERIMENT_DAYS,
   M,
   OUTCOMES,
   compact,
   compareBehaviours,
-  cumulativeBalance,
+  daysSinceData,
   dayProgress,
+  evaluateExperiment,
   fmtClock,
   fmtHoursShort,
   fmtInt,
   focusItems,
   habitStats,
   habits,
+  mean,
   rolling,
+  scoreBand,
+  usualBand,
+  usualLabel,
+  usualRange,
   weeklyReview,
 } from './js/insights.js';
 import {
   LEVEL_LABEL,
   bullet,
-  divergingBars,
+  evidenceRows,
   findLastIndex,
   fmtDateLong,
   fmtDateShort,
@@ -36,8 +47,8 @@ import {
 
 const $ = (sel) => document.querySelector(sel);
 const num = (v) => typeof v === 'number' && Number.isFinite(v);
-const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : undefined);
-const HISTORY_DAYS = 90;
+const HISTORY_DAYS = 365;
+const INSIGHT_DAYS = 90;
 const TABS = ['today', 'habits', 'insights', 'trends'];
 
 function storageGet(k) {
@@ -67,6 +78,7 @@ const state = {
 };
 if (!TABS.includes(state.tab)) state.tab = 'today';
 if (!OUTCOMES[state.outcome]) state.outcome = 'readiness';
+if (![7, 30, 90, 365].includes(state.range)) state.range = 30;
 
 // ── Formatting ────────────────────────────────────────────
 const fmtKm = (m) => (num(m) ? `${(m / 1000).toFixed(1)} km` : '–');
@@ -84,7 +96,10 @@ function fmtAgo(iso) {
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return `${Math.round(s / 86400)} d ago`;
 }
-const signed = (v, fmt) => (v > 0 ? `+${fmt(v)}` : v < 0 ? `−${fmt(-v)}` : fmt(0));
+const signed1 = (v) => {
+  const d = Math.round(v * 10) / 10;
+  return `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(d)}`;
+};
 
 /** Dense array over every date in range so missing days show as gaps, not compressed time. */
 function denseDays(data) {
@@ -140,13 +155,18 @@ function dataTable(headers, rows) {
 }
 
 function legendItem(label, color, kind = 'line') {
-  const key = h('i', { class: kind === 'line' ? 'key-line' : 'key-rect' });
-  key.style.background = color;
+  const key = h('i', { class: kind === 'line' ? 'key-line' : kind === 'band' ? 'key-band' : 'key-rect' });
+  if (color) key.style.background = color;
   return h('span', {}, key, label);
 }
 
 function miniStat(label, value) {
   return h('div', { class: 'mini-stat' }, h('span', { class: 'muted small', text: label }), h('strong', { text: value }));
+}
+
+const TONE_ICON = { good: 'good', attention: 'warning', neutral: null };
+function usualChip(label) {
+  return h('span', { class: `usual-chip tone-${label.tone}` }, TONE_ICON[label.tone] ? statusIcon(TONE_ICON[label.tone]) : h('i', { class: 'usual-dot' }), label.text);
 }
 
 // ── Source status chips ───────────────────────────────────
@@ -173,63 +193,72 @@ function renderSources(sources) {
 }
 
 // ── TODAY ─────────────────────────────────────────────────
-function renderToday(days, goals) {
+function renderToday(days, goals, experiments) {
   const today = days.at(-1);
-  const isLive = today.date === isoToday();
+  const todayIso = isoToday();
+  const isLive = today.date === todayIso;
   const p = isLive ? dayProgress(new Date()) : 1;
+  const stats = Object.fromEntries(habits(goals).map((hb) => [hb.id, habitStats(hb, days.slice(-14), todayIso, goals.daysPerWeek)]));
+  // Count today as soon as an in-progress goal is met, so the weekly line moves when you do.
+  const habitById = Object.fromEntries(habits(goals).map((hb) => [hb.id, hb]));
+  const weekLine = (id, word = 'Hit') => {
+    const s = stats[id];
+    if (!s) return '';
+    const met = s.thisWeek.met + (habitById[id].intraday && habitById[id].bin(today) === 3 ? 1 : 0);
+    return `${word} ${met} of ${s.thisWeek.target} days this week`;
+  };
 
+  // One main focus, Oura "One Big Thing" style; anything else is secondary.
+  const gap = daysSinceData(days);
   const items = focusItems(days, goals, new Date());
-  const focus = card(
-    "Today's focus",
-    'What would move your numbers most today',
-    items.length
-      ? h(
-          'ul',
-          { class: 'focus-list' },
-          ...items.map((it) =>
-            h('li', {}, statusIcon(it.level), h('div', {}, h('span', { class: 'visually-hidden', text: `${LEVEL_LABEL[it.level]}: ` }), h('strong', { text: it.title }), h('p', { text: it.detail }))),
-          ),
-        )
-      : h('p', { class: 'muted', text: 'Nothing needs attention right now. Keep doing what you are doing.' }),
+  const [main, ...rest] = items;
+  const running = experiments.map((e) => ({ e, r: evaluateExperiment(e, days, goals, todayIso) })).filter((x) => !x.r.finished && x.r.behaviour);
+  const focus = h(
+    'section',
+    { class: 'card focus-card' },
+    cardHead("Today's focus", isLive ? `Updated ${fmtAgo(new Date(state.lastFetch).toISOString())}` : fmtDateLong(today.date)),
+    gap >= 2 && Number.isFinite(gap)
+      ? h('div', { class: 'focus-main' }, h('h3', { text: 'Welcome back' }), h('p', { text: `There's no data from the last ${gap} days, which is completely normal. Wear your ring tonight and log a meal or two, and your trends will pick up where they left off.` }))
+      : main
+        ? h('div', { class: `focus-main level-${main.level}` }, h('div', { class: 'focus-title' }, statusIcon(main.level), h('h3', { text: main.title })), h('p', { text: main.detail }), h('span', { class: 'visually-hidden', text: LEVEL_LABEL[main.level] }))
+        : h('div', { class: 'focus-main' }, h('h3', { text: 'Nothing needs attention today' }), h('p', { text: 'Your recovery is within your usual range and your goals are on pace. Keep doing what you are doing.' })),
+    rest.length
+      ? h('div', {}, h('h4', { class: 'mini-title', text: 'Also today' }), h('ul', { class: 'focus-list' }, ...rest.map((it) => h('li', {}, statusIcon(it.level), h('div', {}, h('strong', { text: it.title }), h('p', { text: it.detail }))))))
+      : null,
+    ...running.map(({ e, r }) =>
+      h('div', { class: 'focus-exp' }, h('span', { class: 'exp-tag', text: 'Experiment' }), h('span', {}, h('strong', { text: r.behaviour.label }), ` · day ${r.elapsed} of ${EXPERIMENT_DAYS}${r.tracked ? ` · done on ${r.done} of ${r.tracked} days so far` : ''}`)),
+    ),
   );
 
-  const paceStatus = (value, target, unit, fmt = fmtInt) => {
-    if (!num(value)) return { level: 'info', text: 'No data yet' };
-    if (value >= target) return { level: 'good', text: 'Goal done' };
-    if (!isLive || p >= 1) return { level: 'warning', text: `${fmt(target - value)} ${unit} short` };
+  // Goal progress: bullet bars with target tick, pace marker and a weekly line.
+  const paceStatus = (value, target, unit, id, fmt = fmtInt) => {
+    const week = weekLine(id);
+    if (!num(value)) return { level: 'info', text: `No data yet · ${week}` };
+    if (value >= target) return { level: 'good', text: `Goal done · ${week}` };
+    if (!isLive || p >= 1) return { level: 'info', text: `${fmt(target - value)} ${unit} short · ${week}` };
     const pace = target * p;
     return value >= pace * 0.9
-      ? { level: 'good', text: `On pace · ${fmt(target - value)} ${unit} to go` }
-      : { level: 'warning', text: `${fmt(pace - value)} ${unit} behind pace for this time of day` };
+      ? { level: 'good', text: `On pace · ${week}` }
+      : { level: 'info', text: `${fmt(pace - value)} ${unit} behind pace · ${week}` };
   };
 
   const steps = M.steps(today);
   const protein = M.protein(today);
+  const fiber = M.fiber(today);
   const eaten = M.eaten(today);
   const calGoal = M.calorieGoal(today, goals);
   const tol = goals.calorieTolerancePct / 100;
   const calStatus = !num(eaten)
     ? { level: 'info', text: 'Nothing logged yet today' }
     : eaten > calGoal * (1 + tol)
-      ? { level: 'warning', text: `${fmtInt(eaten - calGoal)} kcal over goal` }
-      : !isLive && eaten < calGoal * (1 - tol)
-        ? { level: 'warning', text: `${fmtInt(calGoal - eaten)} kcal under goal` }
-        : { level: 'good', text: `${fmtInt(Math.max(0, calGoal - eaten))} kcal left` };
+      ? { level: 'warning', text: `Above your range today · ${weekLine('calories', 'In range')}` }
+      : { level: 'good', text: `${isLive ? `${fmtInt(Math.max(0, calGoal - eaten))} kcal left` : 'In range'} · ${weekLine('calories', 'In range')}` };
 
-  // Week to date (Monday start) for intensity minutes.
   const dow = (new Date(`${today.date}T12:00:00`).getDay() + 6) % 7;
   const week = days.slice(-(dow + 1));
   const hasIntensity = week.some((d) => num(M.intensity(d)));
   const weekIntensity = week.reduce((a, d) => a + (M.intensity(d) ?? 0), 0);
   const weekPace = goals.intensityWeekly * ((dow + p) / 7);
-  const weekStatus = !hasIntensity
-    ? { level: 'info', text: 'No data yet' }
-    : weekIntensity >= goals.intensityWeekly
-      ? { level: 'good', text: 'Weekly goal done' }
-      : weekIntensity >= weekPace * 0.9
-        ? { level: 'good', text: `On pace · ${fmtInt(goals.intensityWeekly - weekIntensity)} min to go this week` }
-        : { level: 'warning', text: `${fmtInt(weekPace - weekIntensity)} min behind pace for the week` };
-
   const sleep = M.sleepMin(today);
   const bed = M.bedtime(today);
 
@@ -239,16 +268,31 @@ function renderToday(days, goals) {
     h(
       'div',
       { class: 'bullets' },
-      bullet({ label: 'Steps', value: steps, target: goals.steps, fmt: fmtInt, pace: isLive && p < 1 ? goals.steps * p : undefined, status: paceStatus(steps, goals.steps, 'steps') }),
-      bullet({ label: 'Protein', value: protein, target: goals.protein, unit: 'g', fmt: fmtInt, pace: isLive && p < 1 ? goals.protein * p : undefined, status: paceStatus(protein, goals.protein, 'g') }),
-      bullet({ label: 'Calories', value: eaten, target: calGoal, unit: 'kcal', fmt: fmtInt, band: [calGoal * (1 - tol), calGoal * (1 + tol)], status: calStatus }),
-      bullet({ label: 'Intensity minutes this week', value: hasIntensity ? weekIntensity : undefined, target: goals.intensityWeekly, unit: 'min', fmt: fmtInt, pace: weekPace < goals.intensityWeekly ? weekPace : undefined, status: weekStatus }),
+      bullet({ label: 'Steps', value: steps, target: goals.steps, fmt: fmtInt, pace: isLive && p < 1 ? goals.steps * p : undefined, status: paceStatus(steps, goals.steps, 'steps', 'steps') }),
+      bullet({ label: 'Protein', value: protein, target: goals.protein, unit: 'g', fmt: fmtInt, pace: isLive && p < 1 ? goals.protein * p : undefined, status: paceStatus(protein, goals.protein, 'g', 'protein') }),
+      bullet({ label: 'Fibre', value: fiber, target: goals.fiber, unit: 'g', fmt: fmtInt, pace: isLive && p < 1 ? goals.fiber * p : undefined, status: paceStatus(fiber, goals.fiber, 'g', 'fiber') }),
+      goals.showCalories ? bullet({ label: 'Calories', value: eaten, target: calGoal, unit: 'kcal', fmt: fmtInt, band: [calGoal * (1 - tol), calGoal * (1 + tol)], status: calStatus }) : null,
+      bullet({
+        label: 'Intensity minutes this week',
+        value: hasIntensity ? weekIntensity : undefined,
+        target: goals.intensityWeekly,
+        unit: 'min',
+        fmt: fmtInt,
+        pace: weekPace < goals.intensityWeekly ? weekPace : undefined,
+        status: !hasIntensity
+          ? { level: 'info', text: 'No data yet' }
+          : weekIntensity >= goals.intensityWeekly
+            ? { level: 'good', text: 'Weekly goal done' }
+            : weekIntensity >= weekPace * 0.9
+              ? { level: 'good', text: `On pace · ${fmtInt(goals.intensityWeekly - weekIntensity)} min to go` }
+              : { level: 'info', text: `${fmtInt(weekPace - weekIntensity)} min behind pace for the week` },
+      }),
       bullet({
         label: 'Sleep last night',
         value: sleep,
         target: goals.sleepMin,
         fmt: fmtHoursShort,
-        status: !num(sleep) ? { level: 'info', text: 'No sleep recorded' } : sleep >= goals.sleepMin ? { level: 'good', text: 'Goal met' } : { level: 'warning', text: `${fmtHoursShort(goals.sleepMin - sleep)} short` },
+        status: !num(sleep) ? { level: 'info', text: 'No sleep recorded' } : { level: sleep >= goals.sleepMin ? 'good' : 'info', text: `${sleep >= goals.sleepMin ? 'Goal met' : `${fmtHoursShort(goals.sleepMin - sleep)} short`} · ${weekLine('sleep')}` },
       }),
       h(
         'div',
@@ -256,78 +300,72 @@ function renderToday(days, goals) {
         h('div', { class: 'bullet-head' }, h('span', { class: 'bullet-label', text: 'Bedtime last night' }), h('span', { class: 'bullet-value' }, h('strong', { text: fmtClock(bed) }), ` / ${fmtClock(goals.bedtimeMin)}`)),
         !num(bed)
           ? statusLine('info', 'No bedtime recorded')
-          : bed <= goals.bedtimeMin
-            ? statusLine('good', `${Math.round(goals.bedtimeMin - bed)} min before your target`)
-            : statusLine('warning', `${Math.round(bed - goals.bedtimeMin)} min after your target`),
+          : statusLine(bed <= goals.bedtimeMin ? 'good' : 'info', `${bed <= goals.bedtimeMin ? `${Math.round(goals.bedtimeMin - bed)} min before target` : `${Math.round(bed - goals.bedtimeMin)} min after target`} · ${weekLine('bedtime', 'On time')}`),
       ),
     ),
   );
 
-  // Recovery signals against your own 30-day baseline.
+  // Recovery signals: each against your own usual range, in one shared vocabulary.
   const TILES = [
-    { label: 'Readiness', get: M.readiness, up: true },
-    { label: 'Sleep score', get: M.sleepScore, up: true },
+    { label: 'Readiness', get: M.readiness, up: true, score: true },
+    { label: 'Sleep score', get: M.sleepScore, up: true, score: true },
     { label: 'HRV', get: M.hrv, unit: 'ms', up: true },
     { label: 'Resting HR', get: M.restingHr, unit: 'bpm', up: false },
-    { label: 'Body Battery', get: M.bodyBattery, up: true },
-    { label: 'Calories burned', get: M.burned, unit: 'kcal', up: null },
+    { label: 'Body Battery', get: M.bodyBattery, up: true, score: true },
   ];
   const tiles = h('div', { class: 'tiles' });
   for (const t of TILES) {
-    const idx = findLastIndex(days, (d) => num(t.get(d)));
+    const values = days.map(t.get);
+    const idx = findLastIndex(values, num);
     const tile = h('div', { class: 'tile' }, h('div', { class: 'label', text: t.label }));
     if (idx < 0) {
       tile.append(h('div', { class: 'value', text: '–' }), h('div', { class: 'meta', text: 'No data yet' }));
       tiles.append(tile);
       continue;
     }
-    const day = days[idx];
-    const v = t.get(day);
-    tile.append(h('div', { class: 'value' }, fmtInt(v), t.unit ? h('span', { class: 'unit', text: t.unit }) : null));
-    const meta = h('div', { class: 'meta' }, h('span', { text: day.date === isoToday() ? 'Today' : fmtDateShort(day.date) }));
-    const prev = days.slice(Math.max(0, idx - 30), idx).map(t.get).filter(num);
-    if (prev.length >= 7 && t.up !== null) {
-      const avg = mean(prev);
-      const pct = avg ? Math.round(((v - avg) / avg) * 100) : 0;
-      const better = v - avg > 0 === t.up;
-      meta.append(pct === 0 ? h('span', { class: 'delta', text: 'At your 30-day average' }) : h('span', { class: `delta ${better ? 'good' : 'bad'}`, text: `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs 30-day avg` }));
-    }
-    tile.append(meta);
-    const spark = days.slice(-14).map(t.get);
-    if (spark.filter(num).length >= 2) tile.append(sparkline(spark));
+    const v = values[idx];
+    const range = usualRange(values, idx);
+    const lbl = usualLabel(v, range, t.up);
+    tile.append(
+      h('div', { class: 'value' }, fmtInt(v), t.unit ? h('span', { class: 'unit', text: t.unit }) : null, t.score && scoreBand(v) ? h('span', { class: 'band-word', text: scoreBand(v) }) : null),
+      usualChip(lbl),
+      h('div', { class: 'meta' }, h('span', { text: days[idx].date === todayIso ? 'Today' : fmtDateShort(days[idx].date) }), range ? h('span', { text: `Usual ${fmtInt(range.lo)}–${fmtInt(range.hi)}` }) : null),
+    );
+    const spark = values.slice(-14);
+    if (spark.filter(num).length >= 2) tile.append(sparkline(spark, range));
     tiles.append(tile);
   }
 
-  $('#panel-today').replaceChildren(h('div', { class: 'grid-2' }, focus, progress), h('h3', { class: 'section-title', text: 'Recovery signals' }), tiles);
+  $('#panel-today').replaceChildren(
+    h('div', { class: 'grid-2' }, focus, progress),
+    h('div', { class: 'section-head' }, h('h3', { class: 'section-title', text: 'Recovery signals' }), h('span', { class: 'muted small', text: 'Compared with your usual range: the middle 80% of your last 30 days' })),
+    tiles,
+  );
 }
 
 // ── HABITS ────────────────────────────────────────────────
 function renderHabits(days, goals) {
   const todayIso = isoToday();
-  const rows = habits(goals).map((habit) => ({ habit, stats: habitStats(habit, days, todayIso) }));
+  const rows = habits(goals).map((habit) => ({ habit, stats: habitStats(habit, days, todayIso, goals.daysPerWeek) }));
   const fmtValue = (habit, d) => {
     const v = habit.value(d);
     if (!num(v)) return '–';
     if (habit.id === 'sleep') return fmtHoursShort(v);
     if (habit.id === 'bedtime') return fmtClock(v);
-    if (habit.id === 'protein') return `${fmtInt(v)} g`;
+    if (habit.id === 'protein' || habit.id === 'fiber') return `${fmtInt(v)} g`;
     if (habit.id === 'calories') return `${fmtInt(v)} of ${fmtInt(M.calorieGoal(d, goals))} kcal`;
     return fmtInt(v);
   };
 
-  const ranked = rows.filter((r) => num(r.stats.rate)).sort((a, b) => b.stats.rate - a.stats.rate);
-  const lede = ranked.length
-    ? h(
-        'p',
-        { class: 'lede' },
-        'Most consistent: ',
-        h('strong', { text: `${ranked[0].habit.label.toLowerCase()} (${Math.round(ranked[0].stats.rate * 100)}%)` }),
-        '. Most room to improve: ',
-        h('strong', { text: `${ranked.at(-1).habit.label.toLowerCase()} (${Math.round(ranked.at(-1).stats.rate * 100)}%)` }),
-        '.',
-      )
-    : h('p', { class: 'lede muted', text: 'Not enough data yet.' });
-  const consistency = card('Goal consistency', 'Each square is a day. Today is left out of daily goals until it ends.', lede, habitGrid(rows, days, fmtValue));
+  const done = rows.filter((r) => r.stats.thisWeek.done).length;
+  const reachable = rows.filter((r) => !r.stats.thisWeek.done && r.stats.thisWeek.met + r.stats.thisWeek.daysLeft >= r.stats.thisWeek.target).length;
+  const lede = h(
+    'p',
+    { class: 'lede' },
+    h('strong', { text: done ? `${done} of ${rows.length} goals already done this week${reachable ? `, ${reachable} more still within reach.` : '.'}` : `${reachable} of ${rows.length} goals still within reach this week.` }),
+    ` Each goal asks for ${goals.daysPerWeek} of 7 days, so ${7 - goals.daysPerWeek} days a week are spare: a missed day is planned for, not a failure.`,
+  );
+  const consistency = card('Weekly goals', 'Each square is a day. Grey outlines are days with no data, which never count against you.', lede, habitGrid(rows, days, fmtValue));
 
   const beds = days.map(M.bedtime).filter(num);
   const wakes = days.map(M.wake).filter(num);
@@ -354,7 +392,9 @@ function renderHabits(days, goals) {
     { class: 'card' },
     cardHead('Sleep schedule', 'Each bar runs from bedtime to wake. A regular schedule is one of the simplest ways to sleep better.', 'schedule'),
     stats,
-    beds.length ? h('div', { class: 'legend' }, legendItem('In bed by target', 'var(--series-1)', 'rect'), legendItem('Later than target', 'var(--series-2)', 'rect')) : null,
+    beds.length
+      ? h('div', { class: 'legend' }, legendItem('In bed by target', 'var(--series-1)', 'rect'), legendItem('Later than target', 'var(--series-2)', 'rect'), legendItem('Target window: the 30 minutes before your bedtime', null, 'band'))
+      : null,
     schedBody,
   );
 
@@ -362,11 +402,69 @@ function renderHabits(days, goals) {
 }
 
 // ── INSIGHTS ──────────────────────────────────────────────
-function renderInsights(days, goals) {
+async function startExperiment(r) {
+  const res = await fetch('/api/experiments', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ behaviourId: r.id, outcome: state.outcome, start: isoToday() }),
+  }).catch(() => null);
+  if (!res?.ok) return notify('Could not start the experiment. Try again in a moment');
+  notify(`Started: ${r.label} for 2 weeks`);
+  await load();
+}
+
+async function endExperiment(id) {
+  const res = await fetch(`/api/experiments/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => null);
+  if (!res?.ok) return notify('Could not remove the experiment');
+  await load();
+}
+
+function experimentsCard(experiments, days, goals) {
   const todayIso = isoToday();
+  const list = experiments
+    .map((e) => ({ e, r: evaluateExperiment(e, days, goals, todayIso) }))
+    .filter((x) => x.r.behaviour)
+    .sort((a, b) => b.e.start.localeCompare(a.e.start));
+  if (!list.length) return null;
+  const VERDICT = {
+    running: null,
+    higher: (r) => `${r.outcome.label} was ${signed1(r.result.diff)} ${r.outcome.unit} higher than the 2 weeks before (${r.result.confidence.toLowerCase()} confidence). Worth keeping.`,
+    lower: (r) => `${r.outcome.label} was ${signed1(r.result.diff)} ${r.outcome.unit} lower than the 2 weeks before. This habit may not suit you right now.`,
+    inconclusive: (r) => `${r.outcome.label} changed by ${signed1(r.result.diff)} ${r.outcome.unit}, which is within your normal day-to-day variation. Inconclusive is a real answer: keep it if it feels good.`,
+    'not-enough-data': () => 'Not enough data during the experiment to tell. Try again when your devices are syncing.',
+  };
+  return h(
+    'section',
+    { class: 'card span-2' },
+    cardHead('Your experiments', `Two weeks of a habit, compared with the two weeks before`),
+    h(
+      'div',
+      { class: 'exp-list' },
+      ...list.map(({ e, r }) =>
+        h(
+          'div',
+          { class: 'exp' },
+          h(
+            'div',
+            { class: 'exp-head' },
+            h('div', {}, h('strong', { text: r.behaviour.label }), h('span', { class: 'muted small', text: ` · watching ${r.outcome.label.toLowerCase()} · started ${fmtDateShort(e.start)}` })),
+            h('button', { type: 'button', class: 'link', text: r.finished ? 'Remove' : 'Stop', onclick: () => endExperiment(e.id) }),
+          ),
+          h('div', { class: 'exp-track', role: 'img', 'aria-label': `Day ${r.elapsed} of ${EXPERIMENT_DAYS}` }, h('div', { class: 'exp-fill', style: { width: `${(r.elapsed / EXPERIMENT_DAYS) * 100}%` } })),
+          h('p', { class: 'small', text: r.finished ? VERDICT[r.verdict](r) : `Day ${r.elapsed} of ${EXPERIMENT_DAYS}${r.tracked ? ` · done on ${r.done} of ${r.tracked} days so far` : ''} · results on ${fmtDateShort(r.end)}` }),
+        ),
+      ),
+    ),
+  );
+}
+
+function renderInsights(all, goals, experiments) {
+  const todayIso = isoToday();
+  const days = all.slice(-INSIGHT_DAYS);
   const outcome = OUTCOMES[state.outcome];
   const results = compareBehaviours(days, goals, state.outcome, todayIso);
-  const strongest = results.find((r) => r.enough && Math.abs(r.diff) >= 2);
+  const strongest = results.find((r) => r.enough && r.confidence !== 'Low');
+  const activeIds = new Set(experiments.filter((e) => !evaluateExperiment(e, all, goals, todayIso).finished).map((e) => e.behaviourId));
 
   const seg = h('div', { class: 'segmented', role: 'group', 'aria-label': 'Measure recovery by' });
   for (const [key, o] of Object.entries(OUTCOMES)) {
@@ -387,25 +485,26 @@ function renderInsights(days, goals) {
   const drivers = h(
     'section',
     { class: 'card span-2' },
-    cardHead('What goes with better recovery', `Next-morning ${outcome.label.toLowerCase()} on days with each habit, compared with days without it · last ${HISTORY_DAYS} days`, null, seg),
+    cardHead('What goes with better recovery', `Next-morning ${outcome.label.toLowerCase()} after days with each habit, compared with days without it · last ${INSIGHT_DAYS} days`, null, seg),
     strongest
       ? h(
           'p',
           { class: 'lede' },
-          'Your clearest pattern: ',
-          h('strong', { text: strongest.label.toLowerCase() }),
-          ` goes with ${Math.abs(Math.round(strongest.diff * 10) / 10)} ${outcome.unit} ${strongest.diff > 0 ? 'higher' : 'lower'} ${outcome.label.toLowerCase()} the next morning (${fmtInt(strongest.meanYes)} vs ${fmtInt(strongest.meanNo)}).`,
+          `After ${strongest.after}, your next-morning ${outcome.label.toLowerCase()} averaged `,
+          h('strong', { text: `${fmtInt(strongest.meanYes)} vs ${fmtInt(strongest.meanNo)}` }),
+          ` (${strongest.nYes} vs ${strongest.nNo} days, ${strongest.confidence.toLowerCase()} confidence).`,
         )
-      : h('p', { class: 'lede muted', text: 'No clear pattern yet. Each habit needs at least 5 days with it and 5 without.' }),
-    divergingBars(results, outcome.unit, outcome.label),
-    h('p', { class: 'footnote', text: 'These are patterns in your own data, not proof of cause: a late night and a low score can share a reason, like stress or travel. Use them to choose what to try, then watch whether the number moves.' }),
+      : h('p', { class: 'lede muted', text: `No pattern is clear enough yet. Each habit needs at least 10 days with it and 10 without, and a difference bigger than your normal day-to-day variation.` }),
+    h('div', { class: 'legend' }, legendItem('Difference in averages', 'var(--pos)', 'rect'), h('span', {}, h('i', { class: 'key-ci' }), 'Likely range (95%): if it crosses the centre line, it could be noise')),
+    evidenceRows(results, outcome, { onTry: startExperiment, activeIds }),
+    h('p', { class: 'footnote', text: "These are patterns in your own data, not proof of cause. The 'Also' notes show other things that differed between the two groups. The best way to find out is to try a habit for two weeks and see whether the number moves." }),
   );
 
-  // Week in review
-  const wr = weeklyReview(days, goals, todayIso);
+  // Week in review: wins first, then a goal check-in, then the numbers.
+  const wr = weeklyReview(all, goals, todayIso);
   const table = h('table', { class: 'data review' });
   const head = table.createTHead().insertRow();
-  ['', 'Last 7 days', 'Previous 7', 'Change'].forEach((t, i) => head.append(h('th', { class: i ? 'num' : null, text: t })));
+  ['', 'Last 7 days', '4-week avg', 'Change'].forEach((t, i) => head.append(h('th', { class: i ? 'num' : null, text: t })));
   const body = table.createTBody();
   for (const r of wr.rows) {
     const tr = body.insertRow();
@@ -413,63 +512,67 @@ function renderInsights(days, goals) {
     let change = '–';
     let cls = 'num';
     if (num(r.diff)) {
-      const minutes = r.label === 'Bedtime' || r.label === 'Sleep';
-      const d = minutes ? Math.round(r.diff) : Math.round(r.diff * 10) / 10;
-      const unit = minutes ? ' min' : r.label === 'HRV' ? ' ms' : r.label === 'Resting HR' ? ' bpm' : r.label === 'Protein' ? ' g' : '';
-      if (Math.abs(d) < (minutes ? 1 : 0.5)) change = 'No change';
+      if (!r.meaningful) change = 'Steady';
       else {
-        change = r.label === 'Bedtime' ? `${Math.abs(d)} min ${d > 0 ? 'later' : 'earlier'}` : `${d > 0 ? '▲' : '▼'} ${fmtInt(Math.abs(d))}${unit}`;
-        if (r.upGood !== null) cls += d > 0 === r.upGood ? ' good-text' : ' bad-text';
+        const amount = r.asMinutes ? `${Math.round(Math.abs(r.diff))} min` : `${fmtInt(Math.abs(r.diff))}${r.unit ?? ''}`;
+        change = r.label === 'Bedtime' ? `${amount} ${r.diff > 0 ? 'later' : 'earlier'}` : `${r.diff > 0 ? '▲' : '▼'} ${amount}`;
+        if (r.better !== undefined) cls += r.better ? ' good-text' : ' muted';
       }
     }
     tr.append(h('td', { class: cls, text: change }));
   }
-  const hits = h(
-    'div',
-    { class: 'hit-row' },
-    ...wr.goalsHit.map((g) =>
-      h(
-        'div',
-        { class: 'hit' },
-        h('span', { class: 'muted small', text: g.label }),
-        h('strong', { text: `${g.cur} of 7` }),
-        h('span', { class: `small ${g.cur > g.prev ? 'good-text' : g.cur < g.prev ? 'bad-text' : 'muted'}`, text: g.cur === g.prev ? 'Same' : `${g.cur > g.prev ? '▲' : '▼'} ${Math.abs(g.cur - g.prev)}`, title: `Previous 7 days: ${g.prev} of 7` }),
-      ),
-    ),
-  );
   const review = h(
     'section',
     { class: 'card' },
-    cardHead('Week in review', wr.curRange[0] ? `${fmtDateShort(wr.curRange[0])} – ${fmtDateShort(wr.curRange[1])}, against the 7 days before` : ''),
-    h('h3', { class: 'mini-title', text: 'Days you hit each goal · change vs the 7 days before' }),
-    hits,
+    cardHead('Week in review', wr.curRange[0] ? `${fmtDateShort(wr.curRange[0])} – ${fmtDateShort(wr.curRange[1])}, against your 4-week average` : ''),
+    wr.wins.length
+      ? h('div', {}, h('h3', { class: 'mini-title', text: 'Wins' }), h('ul', { class: 'wins' }, ...wr.wins.slice(0, 4).map((w) => h('li', {}, statusIcon('good'), h('span', { text: w })))))
+      : h('p', { class: 'lede muted', text: 'A quieter week. That happens; next week starts fresh.' }),
+    wr.prompts.length
+      ? h(
+          'div',
+          { class: 'prompts' },
+          h('h3', { class: 'mini-title', text: 'Goal check-in' }),
+          ...wr.prompts.slice(0, 2).map((pr) => h('p', { class: 'small', text: pr.text })),
+          h('button', { type: 'button', class: 'btn btn-ghost btn-sm', text: 'Adjust goals', onclick: () => toggleGoals(true) }),
+        )
+      : null,
     h('h3', { class: 'mini-title', text: 'Averages' }),
     h('div', { class: 'table-wrap' }, table),
   );
 
-  // Running calorie balance over the last 30 days
-  const range = days.slice(-30);
-  const bal = cumulativeBalance(range, todayIso);
-  const kg = bal.total / 7700;
-  const energyBody = state.tables.has('balance')
-    ? dataTable(['Date', 'Eaten', 'Burned', 'Running total'], range.map((d, i) => [fmtDateLong(d.date), fmtInt(M.eaten(d)), fmtInt(M.burned(d)), fmtInt(bal.series[i])]).reverse())
-    : bal.counted >= 2
-      ? deferDraw(h('div', { class: 'chart' }), (el) =>
-          timeChart(el, { title: 'Running calorie balance', type: 'line', zero: true, area: true, fmt: (v) => `${fmtInt(v)} kcal`, series: [{ label: 'Running total', color: 'var(--series-1)', values: bal.series }] }, range.map((d) => d.date)),
-        )
-      : h('div', { class: 'empty-chart', text: 'Needs MyFitnessPal and Garmin data for the same days.' });
-  const energy = h(
+  // Nutrition: 7-day averages against a range. No running deficit ledger.
+  const nd = all.slice(-30);
+  const dates = nd.map((d) => d.date);
+  const tol = goals.calorieTolerancePct / 100;
+  const nutritionCharts = [
+    goals.showCalories && {
+      id: 'n-cal',
+      title: 'Calories',
+      type: 'line',
+      fmt: (v) => `${fmtInt(v)} kcal`,
+      endFmt: compact,
+      height: 150,
+      series: [{ label: 'Calories', color: 'var(--series-1)', values: nd.map(M.eaten) }],
+      rolling: rolling(nd.map(M.eaten)),
+      band: { lo: nd.map((d) => M.calorieGoal(d, goals) * (1 - tol)), hi: nd.map((d) => M.calorieGoal(d, goals) * (1 + tol)) },
+      bandLabel: 'Your calorie range',
+    },
+    { id: 'n-protein', title: 'Protein', type: 'line', fmt: (v) => `${fmtInt(v)} g`, height: 150, series: [{ label: 'Protein', color: 'var(--series-1)', values: nd.map(M.protein) }], rolling: rolling(nd.map(M.protein)), goal: { value: goals.protein, label: `Goal ${goals.protein} g` } },
+    { id: 'n-fiber', title: 'Fibre', type: 'line', fmt: (v) => `${fmtInt(v)} g`, height: 150, series: [{ label: 'Fibre', color: 'var(--series-1)', values: nd.map(M.fiber) }], rolling: rolling(nd.map(M.fiber)), goal: { value: goals.fiber, label: `Goal ${goals.fiber} g` } },
+  ].filter(Boolean);
+  const nutrition = h(
     'section',
     { class: 'card' },
-    cardHead('Running calorie balance', 'Calories eaten minus burned, added up day by day · last 30 days', 'balance'),
-    bal.counted >= 2
-      ? h('p', { class: 'lede' }, h('strong', { text: `${signed(Math.round(bal.total), fmtInt)} kcal` }), ` over ${bal.counted} days, roughly ${kg >= 0 ? '+' : '−'}${Math.abs(kg).toFixed(1)} kg of body weight.`)
-      : null,
-    energyBody,
-    h('p', { class: 'footnote', text: 'Watches can misjudge calories burned by 10–20%, so read this as a direction rather than an exact weight change. The kg figure uses 7,700 kcal per kg.' }),
+    cardHead('Nutrition, 7-day averages', 'Dots are days; the line smooths out the day-to-day swings · last 30 days'),
+    h('div', { class: 'legend' }, legendItem('Daily', 'var(--series-1)', 'rect'), legendItem('7-day average', 'var(--series-1)'), goals.showCalories ? legendItem('Calorie range', null, 'band') : null),
+    ...nutritionCharts.map((c) =>
+      h('div', { class: 'multiple' }, h('div', { class: 'multiple-title' }, h('strong', { text: c.title }), h('span', { class: 'muted small', text: num(c.rolling.at(-1)) ? `7-day avg ${c.fmt(c.rolling.at(-1))}` : '' })), deferDraw(h('div', { class: 'chart' }), (el) => timeChart(el, c, dates))),
+    ),
+    h('p', { class: 'footnote', text: goals.showCalories ? 'Calories burned by exercise are not added back to your food budget. You can hide calories entirely in Goals and keep protein and fibre.' : 'Calories are hidden. Turn them back on in Goals.' }),
   );
 
-  $('#panel-insights').replaceChildren(h('div', { class: 'grid-2' }, drivers, review, energy));
+  $('#panel-insights').replaceChildren(h('div', { class: 'grid-2' }, experimentsCard(experiments, all, goals), drivers, review, nutrition));
 }
 
 // ── TRENDS ────────────────────────────────────────────────
@@ -477,9 +580,16 @@ function renderTrends(days, goals, activities) {
   const dates = days.map((d) => d.date);
   const series = (label, get, color) => ({ label, color, values: days.map(get) });
   const calGoal = M.calorieGoal(days.at(-1), goals);
+  // Bands are computed on the full history so the first days in view have one too.
+  const full = denseDays(state.data);
+  const offset = full.length - days.length;
+  const bandFor = (get) => {
+    const b = usualBand(full.map(get));
+    return { lo: b.lo.slice(offset), hi: b.hi.slice(offset) };
+  };
   const CHARTS = [
     { id: 'scores', title: 'Sleep & readiness', note: 'Oura · score 0–100', type: 'line', fmt: fmtInt, series: [series('Sleep score', M.sleepScore, 'var(--series-1)'), series('Readiness', M.readiness, 'var(--series-2)')] },
-    {
+    goals.showCalories && {
       id: 'energy',
       title: 'Calories eaten vs burned',
       note: 'kcal · MyFitnessPal vs Garmin',
@@ -511,9 +621,9 @@ function renderTrends(days, goals, activities) {
       series: [series('Deep', M.deep, 'var(--series-1)'), series('REM', M.rem, 'var(--series-2)'), series('Light', M.light, 'var(--series-3)')],
       goal: { value: goals.sleepMin, label: `Goal ${fmtHoursShort(goals.sleepMin)}`, fmt: fmtHoursShort },
     },
-    { id: 'rhr', title: 'Resting heart rate', note: 'bpm · dots are nights, the line is the 7-day average · lower is better', type: 'line', fmt: (v) => `${fmtInt(v)} bpm`, series: [series('Resting HR', M.restingHr, 'var(--series-1)')], rolling: rolling(days.map(M.restingHr)) },
-    { id: 'hrv', title: 'Heart rate variability', note: 'ms · dots are nights, the line is the 7-day average · higher is better', type: 'line', fmt: (v) => `${fmtInt(v)} ms`, series: [series('HRV', M.hrv, 'var(--series-1)')], rolling: rolling(days.map(M.hrv)) },
-  ];
+    { id: 'rhr', title: 'Resting heart rate', note: 'bpm · lower is usually better', type: 'line', fmt: (v) => `${fmtInt(v)} bpm`, series: [series('Resting HR', M.restingHr, 'var(--series-1)')], rolling: rolling(days.map(M.restingHr)), band: bandFor(M.restingHr) },
+    { id: 'hrv', title: 'Heart rate variability', note: 'ms · higher is usually better', type: 'line', fmt: (v) => `${fmtInt(v)} ms`, series: [series('HRV', M.hrv, 'var(--series-1)')], rolling: rolling(days.map(M.hrv)), band: bandFor(M.hrv) },
+  ].filter(Boolean);
 
   const grid = h('div', { class: 'grid' });
   for (const c of CHARTS) {
@@ -525,6 +635,7 @@ function renderTrends(days, goals, activities) {
             { class: 'legend' },
             ...c.series.map((s) => legendItem(c.rolling && c.type === 'line' ? `Daily ${s.label}` : s.label, s.color, c.type === 'line' && !c.rolling ? 'line' : 'rect')),
             c.rolling ? legendItem('7-day average', c.type === 'line' ? c.series[0].color : 'var(--text-primary)') : null,
+            c.band ? legendItem('Your usual range', null, 'band') : null,
           )
         : null;
     const body = !hasData
@@ -538,19 +649,27 @@ function renderTrends(days, goals, activities) {
     grid.append(h('section', { class: 'card' }, cardHead(c.title, c.note, c.id), hasData ? legend : null, body));
   }
 
+  // Activities, each linked to how you recovered the next morning.
+  const byDate = new Map(full.map((d, i) => [d.date, i]));
+  const readyVals = full.map(M.readiness);
   const acts = h('table', { class: 'data' });
   const ah = acts.createTHead().insertRow();
-  ['Date', 'Activity', 'Duration', 'Distance', 'Calories', 'Avg HR'].forEach((t, i) => ah.append(h('th', { class: i > 1 ? 'num' : null, text: t })));
+  ['Date', 'Activity', 'Duration', 'Distance', 'Calories', 'Avg HR', 'Next-morning readiness'].forEach((t, i) => ah.append(h('th', { class: i > 1 ? 'num' : null, text: t })));
   const ab = acts.createTBody();
   const inRange = activities.filter((a) => a.start.slice(0, 10) >= dates[0]);
-  if (!inRange.length) ab.insertRow().append(h('td', { colspan: '6', class: 'muted', text: 'No activities in this range.' }));
+  if (!inRange.length) ab.insertRow().append(h('td', { colspan: '7', class: 'muted', text: 'No activities in this range.' }));
   for (const a of inRange) {
     const tr = ab.insertRow();
     tr.append(h('td', { text: fmtDateLong(a.start.slice(0, 10)) }), h('td', { text: a.name }));
-    for (const [v, f] of [[a.durationS, fmtDur], [a.distanceM, fmtKm], [a.calories, fmtInt], [a.avgHr, fmtInt]]) tr.append(h('td', { class: 'num', text: f(v) }));
+    for (const [v, f] of [[a.durationS, fmtDur], [a.distanceM, fmtKm], [goals.showCalories ? a.calories : undefined, fmtInt], [a.avgHr, fmtInt]]) tr.append(h('td', { class: 'num', text: f(v) }));
+    const i = byDate.get(a.start.slice(0, 10));
+    const next = i === undefined ? undefined : i + 1;
+    const r = next !== undefined && next < full.length ? readyVals[next] : undefined;
+    const lbl = num(r) ? usualLabel(r, usualRange(readyVals, next), true) : undefined;
+    tr.append(h('td', { class: 'num' }, num(r) ? h('span', {}, h('strong', { text: fmtInt(r) }), h('span', { class: 'muted', text: ` · ${lbl.text.replace('Within your usual', 'usual').replace(' than usual', '').toLowerCase()}` })) : '–'));
   }
 
-  $('#panel-trends').replaceChildren(grid, card('Recent activities', 'Garmin', h('div', { class: 'table-wrap' }, acts)));
+  $('#panel-trends').replaceChildren(grid, card('Recent activities', 'Garmin · with how recovered you were the next morning', h('div', { class: 'table-wrap' }, acts)));
 }
 
 // ── Shell: tabs, goals, loading, live updates ─────────────
@@ -570,19 +689,20 @@ function render() {
   // The range picker scopes only the views it applies to; the others say what they cover.
   $('#range-wrap').hidden = !(state.tab === 'habits' || state.tab === 'trends');
   $('#scope-note').textContent =
-    state.tab === 'today' ? 'Today, against your goals and your 30-day baseline' : state.tab === 'insights' ? `Patterns from your last ${HISTORY_DAYS} days` : '';
+    state.tab === 'today' ? 'Today, against your goals and your usual range' : state.tab === 'insights' ? `Patterns from your last ${INSIGHT_DAYS} days` : '';
 
   const data = state.data;
   if (!data) return;
   const all = denseDays(data);
   const goals = goalsOf(data);
+  const experiments = data.experiments ?? [];
   const ranged = all.slice(-state.range);
   renderSources(data.sources);
   $('#sync').disabled = data.sources.some((s) => s.syncing);
 
-  if (state.tab === 'today') renderToday(all, goals);
+  if (state.tab === 'today') renderToday(all, goals, experiments);
   else if (state.tab === 'habits') renderHabits(ranged, goals);
-  else if (state.tab === 'insights') renderInsights(all, goals);
+  else if (state.tab === 'insights') renderInsights(all, goals, experiments);
   else renderTrends(ranged, goals, data.activities);
   renderLive();
 }
@@ -612,15 +732,19 @@ function fillGoals(goals) {
   $('#g-bedtime').value = fmtClock(goals.bedtimeMin);
   $('#g-steps').value = String(goals.steps);
   $('#g-protein').value = String(goals.protein);
+  $('#g-fiber').value = String(goals.fiber);
+  $('#g-days').value = String(goals.daysPerWeek);
   $('#g-calories').value = String(goals.calories);
   $('#g-tol').value = String(goals.calorieTolerancePct);
   $('#g-intensity').value = String(goals.intensityWeekly);
+  $('#g-show-cal').checked = goals.showCalories;
 }
 function toggleGoals(open) {
   $('#goals-panel').hidden = !open;
   $('#goals-toggle').setAttribute('aria-expanded', String(open));
   if (open && state.data) {
     fillGoals(goalsOf(state.data));
+    $('#goals-panel').scrollIntoView({ block: 'nearest' });
     $('#g-sleep').focus();
   }
 }
@@ -634,9 +758,12 @@ $('#goals-form').addEventListener('submit', async (e) => {
     bedtimeMin: hh >= 12 ? hh * 60 + mm - 1440 : hh * 60 + mm,
     steps: Number($('#g-steps').value),
     protein: Number($('#g-protein').value),
+    fiber: Number($('#g-fiber').value),
+    daysPerWeek: Number($('#g-days').value),
     calories: Number($('#g-calories').value),
     calorieTolerancePct: Number($('#g-tol').value),
     intensityWeekly: Number($('#g-intensity').value),
+    showCalories: $('#g-show-cal').checked,
   };
   const res = await fetch('/api/goals', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(goals) }).catch(() => null);
   if (!res?.ok) {

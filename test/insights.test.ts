@@ -5,6 +5,11 @@ import { clockFromIso } from '../src/lib/dates.js';
 
 const goals = { ...I.DEFAULT_GOALS };
 const day = (date: string, extra: Record<string, unknown> = {}) => ({ date, ...extra });
+const iso = (base: string, n: number) => {
+  const d = new Date(`${base}T12:00:00`);
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 describe('formatting', () => {
   it('formats clock minutes either side of midnight', () => {
@@ -24,72 +29,108 @@ describe('clockFromIso', () => {
 
 describe('rolling', () => {
   it('averages the trailing window and skips gaps', () => {
-    const r = I.rolling([10, 20, undefined, 30, 40], 3, 2);
-    expect(r).toEqual([undefined, 15, 15, 25, 35]);
+    expect(I.rolling([10, 20, undefined, 30, 40], 3, 2)).toEqual([undefined, 15, 15, 25, 35]);
   });
 });
 
-describe('habitStats', () => {
-  const steps = I.habits(goals).find((h: { id: string }) => h.id === 'steps');
-  const days = [
-    day('2026-10-01', { garmin: { steps: 12000 } }),
-    day('2026-10-02', { garmin: { steps: 4000 } }),
-    day('2026-10-03', { garmin: { steps: 11000 } }),
-    day('2026-10-04'), // no data: neither breaks nor extends the streak
-    day('2026-10-05', { garmin: { steps: 10500 } }),
-    day('2026-10-06', { garmin: { steps: 300 } }), // today, in progress
-  ];
+describe('usual range', () => {
+  const values = Array.from({ length: 30 }, (_, i) => 50 + (i % 11)); // 50..60
+  it('needs 10 days, then uses the middle 80% of the last 30', () => {
+    expect(I.usualRange(values, 5)).toBeUndefined();
+    const r = I.usualRange(values, 30);
+    expect(r.lo).toBeGreaterThanOrEqual(50);
+    expect(r.hi).toBeLessThanOrEqual(60);
+    expect(r.lo).toBeLessThan(r.median);
+  });
+  it('labels values in one shared vocabulary, with direction-aware tone', () => {
+    const r = { lo: 50, median: 55, hi: 60 };
+    expect(I.usualLabel(55, r, true)).toMatchObject({ state: 'within', tone: 'neutral' });
+    expect(I.usualLabel(45, r, true)).toMatchObject({ text: 'Lower than usual', tone: 'attention' });
+    expect(I.usualLabel(45, r, false)).toMatchObject({ tone: 'good' }); // e.g. resting HR
+    expect(I.usualLabel(undefined, r, true).state).toBe('unknown');
+  });
+  it('bands scores with Oura thresholds', () => {
+    expect([I.scoreBand(90), I.scoreBand(75), I.scoreBand(60)]).toEqual(['Optimal', 'Good', 'Pay attention']);
+  });
+});
 
-  it('scores closeness to goal, ignores today, and counts streaks', () => {
-    const s = I.habitStats(steps, days, '2026-10-06');
-    expect(s.bins).toEqual([3, 0, 3, undefined, 3, undefined]);
-    expect(s).toMatchObject({ evaluated: 4, met: 3, rate: 0.75, streak: 2, best: 2 });
+describe('weekly habit goals', () => {
+  const steps = I.habits(goals).find((h: { id: string }) => h.id === 'steps');
+  // Weeks start Monday 2026-09-14. Two full weeks then the current (partial) week.
+  const pattern = [1, 1, 1, 1, 1, 0, 0, /* week 2 */ 1, 1, 1, 1, 1, 1, 0, /* week 3 */ 1, 1, 0];
+  const days = pattern.map((hit, i) => day(iso('2026-09-14', i), { garmin: { steps: hit ? 11000 : 3000 } }));
+  days.push(day(iso('2026-09-14', pattern.length), { garmin: { steps: 200 } })); // today, in progress
+  const todayIso = days.at(-1).date;
+
+  it('counts weeks that met "5 of 7" and shows progress this week', () => {
+    const s = I.habitStats(steps, days, todayIso, 5);
+    expect(s.thisWeek).toMatchObject({ met: 2, target: 5, done: false });
+    expect(s.weekStreak).toBe(2);
+    expect(s.recent).toEqual({ met: 13, scored: 17 });
+  });
+
+  it('does not let a week with missing data break the streak', () => {
+    const gappy = days.map((d, i) => (i >= 7 && i < 14 ? day(d.date) : d));
+    expect(I.habitStats(steps, gappy, todayIso, 5).weekStreak).toBe(1);
+  });
+
+  it('drops calories entirely when hidden', () => {
+    expect(I.habits({ ...goals, showCalories: false }).some((h: { id: string }) => h.id === 'calories')).toBe(false);
   });
 });
 
 describe('compareBehaviours', () => {
-  it('compares next-morning readiness after hard days vs other days', () => {
-    const days = Array.from({ length: 21 }, (_, i) => {
+  const build = (n: number) =>
+    Array.from({ length: n }, (_, i) => {
       const hard = i % 2 === 0;
-      return day(`2026-09-${String(i + 1).padStart(2, '0')}`, {
+      return day(iso('2026-06-01', i), {
         garmin: { intensityMinutes: hard ? 80 : 10 },
-        // the morning after a hard day reads 70; otherwise 80
-        oura: { readinessScore: i > 0 && (i - 1) % 2 === 0 ? 70 : 80 },
+        oura: { readinessScore: i > 0 && (i - 1) % 2 === 0 ? 70 + (i % 3) : 80 + (i % 3) },
       });
     });
-    const res = I.compareBehaviours(days, goals, 'readiness', '2026-09-30');
+
+  it('reports the difference, a 95% range and a confidence word', () => {
+    const res = I.compareBehaviours(build(41), goals, 'readiness', '2026-12-01');
     const hard = res.find((r: { id: string }) => r.id === 'hard');
-    expect(hard).toMatchObject({ nYes: 10, nNo: 10, meanYes: 70, meanNo: 80, diff: -10, enough: true });
+    expect(hard).toMatchObject({ nYes: 20, nNo: 20, enough: true, confidence: 'High' });
+    expect(hard.diff).toBeCloseTo(-10, 0);
+    expect(hard.lo).toBeLessThan(hard.diff);
+    expect(hard.hi).toBeGreaterThan(hard.diff);
   });
 
-  it('withholds a result when either group is too small', () => {
-    const days = [day('2026-09-01', { garmin: { intensityMinutes: 80 } }), day('2026-09-02', { oura: { readinessScore: 70 } })];
-    const hard = I.compareBehaviours(days, goals, 'readiness', '2026-09-30').find((r: { id: string }) => r.id === 'hard');
+  it('holds back a result until each side has 10 days, and says how many more', () => {
+    const hard = I.compareBehaviours(build(13), goals, 'readiness', '2026-12-01').find((r: { id: string }) => r.id === 'hard');
     expect(hard.enough).toBe(false);
     expect(hard.diff).toBeUndefined();
+    expect(hard.needYes + hard.needNo).toBeGreaterThan(0);
+  });
+});
+
+describe('experiments', () => {
+  it('compares the two weeks of a habit with the two weeks before', () => {
+    const days = Array.from({ length: 40 }, (_, i) => {
+      const during = i > 14 && i <= 28; // nights that end on the mornings after experiment days
+      return day(iso('2026-08-01', i), {
+        oura: { bedtimeMin: during ? -90 : 30, readinessScore: (i > 14 && i <= 28 ? 82 : 72) + (i % 3) },
+      });
+    });
+    const r = I.evaluateExperiment({ id: 'x', behaviourId: 'bedtime', outcome: 'readiness', start: iso('2026-08-01', 14) }, days, goals, iso('2026-08-01', 39));
+    expect(r.finished).toBe(true);
+    expect(r.verdict).toBe('higher');
+    expect(r.done).toBe(r.tracked);
   });
 });
 
 describe('focusItems', () => {
-  it('flags low readiness and a step shortfall for the time of day', () => {
-    const past = Array.from({ length: 10 }, (_, i) => day(`2026-09-${String(i + 1).padStart(2, '0')}`, { oura: { readinessScore: 80 } }));
-    const today = day('2026-09-11', { oura: { readinessScore: 62 }, garmin: { steps: 2000 } });
-    const items = I.focusItems([...past, today], goals, new Date(2026, 8, 11, 15, 0));
-    expect(items[0]).toMatchObject({ level: 'warning', title: 'Make today an easy day' });
-    expect(items.some((i: { title: string }) => /steps behind pace/.test(i.title))).toBe(true);
-  });
-});
-
-describe('cumulativeBalance', () => {
-  it('sums eaten minus burned for complete days only', () => {
-    const days = [
-      day('2026-10-01', { mfp: { calories: 2000 }, garmin: { totalCalories: 2500 } }),
-      day('2026-10-02'),
-      day('2026-10-03', { mfp: { calories: 2600 }, garmin: { totalCalories: 2400 } }),
-      day('2026-10-04', { mfp: { calories: 500 }, garmin: { totalCalories: 900 } }),
-    ];
-    const r = I.cumulativeBalance(days, '2026-10-04');
-    expect(r.series).toEqual([-500, -500, -300, -300]);
-    expect(r).toMatchObject({ total: -300, counted: 2 });
+  it('leads with an easy-day suggestion that names a likely reason and reassures', () => {
+    const past = Array.from({ length: 20 }, (_, i) =>
+      day(iso('2026-09-01', i), { oura: { readinessScore: 78 + (i % 5), totalSleepMin: 450 + (i % 4) * 10, avgHrv: 50 + (i % 4), bedtimeMin: -70 }, garmin: { restingHr: 52 + (i % 2) } }),
+    );
+    const today = day('2026-09-21', { oura: { readinessScore: 60, totalSleepMin: 340, avgHrv: 38, bedtimeMin: 40 }, garmin: { restingHr: 60, steps: 2000 } });
+    const items = I.focusItems([...past, today], goals, new Date(2026, 8, 21, 15, 0));
+    expect(items[0]).toMatchObject({ level: 'warning', title: 'Take it easier today' });
+    expect(items[0].detail).toMatch(/below your usual/);
+    expect(items[0].detail).toMatch(/sleep was short/);
+    expect(items[0].detail).toMatch(/one lower day is normal/);
   });
 });

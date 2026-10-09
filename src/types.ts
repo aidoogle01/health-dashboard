@@ -100,11 +100,25 @@ export interface Goals {
   bedtimeMin: number;
   steps: number;
   protein: number;
+  fiber: number;
   /** Used when MyFitnessPal has no daily calorie goal for the day. */
   calories: number;
   /** A day counts as on target when calories land within this % of the goal. */
   calorieTolerancePct: number;
   intensityWeekly: number;
+  /** Daily habits count as on track when met this many days a week; the rest are spare days. */
+  daysPerWeek: number;
+  /** Calories can be hidden entirely while protein and fibre stay visible. */
+  showCalories: boolean;
+}
+
+/** A two-week personal experiment started from an insight. */
+export interface Experiment {
+  id: string;
+  behaviourId: string;
+  outcome: 'readiness' | 'sleepScore' | 'hrv';
+  /** First day, YYYY-MM-DD. */
+  start: string;
 }
 
 export const DEFAULT_GOALS: Goals = {
@@ -112,7 +126,10 @@ export const DEFAULT_GOALS: Goals = {
   bedtimeMin: -60,
   steps: 10000,
   protein: 150,
+  fiber: 30,
   calories: 2200,
   calorieTolerancePct: 10,
   intensityWeekly: 150,
+  daysPerWeek: 5,
+  showCalories: true,
 };

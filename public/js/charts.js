@@ -98,16 +98,17 @@ function axisLabel(svg, x, y, text, anchor = 'middle', baseline = 'auto') {
 }
 
 // ── Sparkline ────────────────────────────────────────────
-export function sparkline(vals) {
+export function sparkline(vals, band) {
   const w = 140;
   const ht = 28;
   const pad = 3;
   const nums = vals.filter(num);
-  const min = Math.min(...nums);
-  const max = Math.max(...nums);
+  const min = Math.min(...nums, ...(band ? [band.lo] : []));
+  const max = Math.max(...nums, ...(band ? [band.hi] : []));
   const x = (i) => pad + (i / (vals.length - 1)) * (w - pad * 2);
   const y = (v) => (max === min ? ht / 2 : ht - pad - ((v - min) / (max - min)) * (ht - pad * 2));
   const svg = el('svg', { class: 'spark', viewBox: `0 0 ${w} ${ht}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  if (band) svg.append(el('rect', { x: 0, width: w, y: y(band.hi), height: Math.max(1, y(band.lo) - y(band.hi)), fill: 'var(--usual)' }));
   svg.append(el('path', { d: linePath(vals, x, y), fill: 'none', stroke: 'var(--axis)', 'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
   const last = findLastIndex(vals, num);
   svg.append(el('circle', { cx: x(last), cy: y(vals[last]), r: 2.5, fill: 'var(--accent)' }));
@@ -146,6 +147,12 @@ export function timeChart(holder, c, dates) {
       hi += pad;
     }
   }
+  if (c.band) {
+    const bl = c.band.lo.filter(num);
+    const bh = c.band.hi.filter(num);
+    if (bl.length) lo = Math.min(lo, ...bl);
+    if (bh.length) hi = Math.max(hi, ...bh);
+  }
   if (c.goal) {
     lo = Math.min(lo, c.goal.value);
     hi = Math.max(hi, c.goal.value * 1.05);
@@ -161,6 +168,21 @@ export function timeChart(holder, c, dates) {
   }
   const every = Math.max(1, Math.ceil(n / 5));
   for (let i = n - 1; i >= 0; i -= every) axisLabel(svg, cx(i), H - 6, fmtDateShort(dates[i]));
+
+  // Your usual range: a quiet band behind the data, broken where it isn't known yet.
+  if (c.band) {
+    let seg = [];
+    const flush = () => {
+      if (seg.length > 1) {
+        const top = seg.map((i, k) => `${k ? 'L' : 'M'}${cx(i).toFixed(1)},${y(c.band.hi[i]).toFixed(1)}`).join('');
+        const bottom = [...seg].reverse().map((i) => `L${cx(i).toFixed(1)},${y(c.band.lo[i]).toFixed(1)}`).join('');
+        svg.append(el('path', { d: `${top}${bottom}Z`, fill: 'var(--usual)' }));
+      }
+      seg = [];
+    };
+    dates.forEach((_, i) => (num(c.band.lo[i]) && num(c.band.hi[i]) ? seg.push(i) : flush()));
+    flush();
+  }
 
   const hoverBand = el('rect', { y: m.top, height: ih, width: band, fill: 'var(--hover)', visibility: 'hidden' });
   const crosshair = el('line', { y1: m.top, y2: m.top + ih, stroke: 'var(--axis)', 'stroke-width': 1, visibility: 'hidden' });
@@ -267,6 +289,7 @@ export function timeChart(holder, c, dates) {
     if (c.type === 'stack') rows.push({ value: c.fmt(vals.reduce((a, v) => a + (v[i] ?? 0), 0)), label: 'Total' });
     if (c.rolling) rows.push({ value: num(c.rolling[i]) ? c.fmt(c.rolling[i]) : '–', label: '7-day average', color: lineSets[0].color });
     if (c.goal) rows.push({ value: c.goal.fmt ? c.goal.fmt(c.goal.value) : c.fmt(c.goal.value), label: 'Goal' });
+    if (c.band && num(c.band.lo[i])) rows.push({ value: `${c.fmt(c.band.lo[i])} – ${c.fmt(c.band.hi[i])}`, label: 'Your usual' });
     showTip(fmtDateLong(dates[i]), rows, clientX ?? rect.left + (x / W) * rect.width, rect.top + 8);
   };
   const hide = () => {
@@ -367,7 +390,10 @@ export function habitGrid(rows, days, fmtValue) {
       cell.addEventListener('pointerleave', hideTip);
       strip.append(cell);
     });
-    const rate = num(stats.rate) ? `${Math.round(stats.rate * 100)}%` : '–';
+    const wk = stats.thisWeek;
+    const weekText = wk.done ? `Done this week · ${wk.met} of ${wk.target}` : `${wk.met} of ${wk.target} this week`;
+    // A streak is only shown while it's alive; otherwise the longer view is kinder and more useful.
+    const longText = stats.weekStreak >= 1 ? `${stats.weekStreak}-week streak` : `${stats.recent.met} of last ${stats.recent.scored} days`;
     wrap.append(
       h(
         'div',
@@ -379,8 +405,8 @@ export function habitGrid(rows, days, fmtValue) {
           h(
             'span',
             { class: 'heat-stats' },
-            h('span', {}, h('strong', { text: rate }), h('span', { class: 'muted', text: ` hit (${stats.met}/${stats.evaluated})` })),
-            h('span', {}, h('strong', { text: String(stats.streak) }), h('span', { class: 'muted', text: ` day streak · best ${stats.best}` })),
+            h('span', { class: wk.done ? 'week-done' : null }, wk.done ? statusIcon('good') : null, h('strong', { text: weekText })),
+            h('span', { class: 'muted', text: longText }),
           ),
         ),
         strip,
@@ -430,6 +456,7 @@ export function sleepSchedule(holder, days, bed, wake, targetBed, fmtDur) {
   });
 
   const ty = y(targetBed);
+  svg.append(el('rect', { x: m.left, width: iw, y: y(targetBed - 30), height: ty - y(targetBed - 30), fill: 'var(--usual)' }));
   svg.append(el('line', { x1: m.left, x2: W - m.right, y1: ty, y2: ty, stroke: 'var(--text-secondary)', 'stroke-width': 1, 'shape-rendering': 'crispEdges' }));
   const tl = el('text', { x: m.left + 4, y: ty - 5, class: 'goal-label' });
   tl.textContent = `Target bedtime ${fmtClock(targetBed)}`;
@@ -470,34 +497,47 @@ export function sleepSchedule(holder, days, bed, wake, targetBed, fmtDur) {
   holder.replaceChildren(svg);
 }
 
-// ── Diverging bars: difference with vs without a behaviour ───
-export function divergingBars(results, unit, outcomeLabel) {
-  const maxAbs = Math.max(1, ...results.filter((r) => r.enough).map((r) => Math.abs(r.diff)));
+// ── Evidence rows: difference with vs without a habit ───────
+/**
+ * Each row: the observed difference as a bar from zero, its 95% interval as a
+ * whisker (the "noise band"), sample sizes, a confidence word, anything else
+ * that differed between the two groups, and a way to test it for two weeks.
+ */
+export function evidenceRows(results, outcome, { onTry, activeIds = new Set() } = {}) {
+  const shown = results.filter((r) => r.enough);
+  const maxAbs = Math.max(1, ...shown.map((r) => Math.max(Math.abs(r.lo), Math.abs(r.hi))));
+  const pos = (v) => `${50 + (v / maxAbs) * 50}%`;
   const list = h('div', { class: 'diverge' });
   list.append(
-    h('div', { class: 'diverge-axis' }, h('span'), h('div', { class: 'diverge-axis-labels' }, h('span', { text: `Lower ${outcomeLabel.toLowerCase()}` }), h('span', { text: `Higher ${outcomeLabel.toLowerCase()}` })), h('span')),
+    h('div', { class: 'diverge-axis' }, h('span'), h('div', { class: 'diverge-axis-labels' }, h('span', { text: `Lower ${outcome.label.toLowerCase()}` }), h('span', { text: `Higher ${outcome.label.toLowerCase()}` })), h('span')),
   );
   for (const r of results) {
+    const label = h('div', { class: 'diverge-label' }, h('span', { text: r.label }));
     const track = h('div', { class: 'diverge-track' }, h('div', { class: 'diverge-zero' }));
     let value;
     if (r.enough) {
-      const w = `${(Math.abs(r.diff) / maxAbs) * 50}%`;
-      const pos = r.diff >= 0;
-      track.append(h('div', { class: `diverge-bar ${pos ? 'pos' : 'neg'}`, style: pos ? { left: '50%', width: w } : { right: '50%', width: w } }));
-      const rounded = Math.round(r.diff * 10) / 10;
-      value = h('span', { class: 'diverge-value', text: `${rounded > 0 ? '+' : rounded < 0 ? '−' : '±'}${Math.abs(rounded)} ${unit}` });
+      const d = Math.round(r.diff * 10) / 10;
+      track.append(
+        h('div', { class: `diverge-bar ${r.diff >= 0 ? 'pos' : 'neg'}`, style: r.diff >= 0 ? { left: '50%', width: `calc(${pos(r.diff)} - 50%)` } : { left: pos(r.diff), width: `calc(50% - ${pos(r.diff)})` } }),
+        h('div', { class: 'diverge-ci', style: { left: pos(r.lo), width: `calc(${pos(r.hi)} - ${pos(r.lo)})` }, title: `95% range: ${Math.round(r.lo * 10) / 10} to ${Math.round(r.hi * 10) / 10} ${outcome.unit}` }),
+      );
+      value = h('div', { class: 'diverge-value' }, h('strong', { text: `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(d)} ${outcome.unit}` }), h('span', { class: `confidence c-${r.confidence.toLowerCase()}`, text: `${r.confidence} confidence` }));
+      label.append(h('span', { class: 'muted small', text: `${r.nYes} days with · ${r.nNo} without` }));
+      if (r.confounders.length) {
+        label.append(h('span', { class: 'muted small', text: `Also: ${r.confounders.map((c) => `${Math.round(c.yes * 100)}% vs ${Math.round(c.no * 100)}% ${c.text}`).join('; ')}` }));
+      }
+      if (onTry && r.tryable) {
+        const active = activeIds.has(r.id);
+        label.append(h('button', { type: 'button', class: 'try-btn', disabled: active, text: active ? 'Experiment running' : 'Try for 2 weeks', onclick: () => onTry(r) }));
+      }
     } else {
-      value = h('span', { class: 'diverge-value muted', text: 'Too few days' });
+      const have = Math.min(r.nYes, r.nNo);
+      track.append(h('div', { class: 'need-track' }, h('div', { class: 'need-fill', style: { width: `${Math.round((have / (have + Math.max(r.needYes, r.needNo))) * 100)}%` } })));
+      const need = [r.needYes ? `${r.needYes} more days with it` : null, r.needNo ? `${r.needNo} more without` : null].filter(Boolean).join(' and ');
+      label.append(h('span', { class: 'muted small', text: `${r.nYes} days with · ${r.nNo} without` }));
+      value = h('span', { class: 'diverge-value muted', text: `Needs ${need}` });
     }
-    list.append(
-      h(
-        'div',
-        { class: 'diverge-row' },
-        h('div', { class: 'diverge-label' }, h('span', { text: r.label }), h('span', { class: 'muted small', text: `${r.nYes} days with · ${r.nNo} without` })),
-        track,
-        value,
-      ),
-    );
+    list.append(h('div', { class: `diverge-row${r.enough ? '' : ' pending'}` }, label, track, value));
   }
   return list;
 }

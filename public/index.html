@@ -37,9 +37,12 @@
             <label>Bedtime<input id="g-bedtime" name="bedtime" type="time" required /></label>
             <label>Steps<input id="g-steps" name="steps" type="number" min="500" max="50000" step="500" required /></label>
             <label>Protein (g)<input id="g-protein" name="protein" type="number" min="10" max="400" step="5" required /></label>
+            <label>Fibre (g)<input id="g-fiber" name="fiber" type="number" min="5" max="100" step="1" required /></label>
+            <label>Days a week per goal<input id="g-days" name="daysPerWeek" type="number" min="1" max="7" step="1" required /><span class="hint">The rest are spare days. 5 of 7 is a good start</span></label>
             <label>Calories (kcal)<input id="g-calories" name="calories" type="number" min="800" max="6000" step="50" required /><span class="hint">Your MyFitnessPal goal is used for any day that has one</span></label>
             <label>Calorie range (±%)<input id="g-tol" name="tol" type="number" min="2" max="30" step="1" required /></label>
             <label>Intensity minutes / week<input id="g-intensity" name="intensity" type="number" min="0" max="1500" step="10" required /></label>
+            <label class="check"><input id="g-show-cal" name="showCalories" type="checkbox" /> Show calories<span class="hint">Turn off to track protein and fibre without calorie numbers</span></label>
           </div>
           <div class="goals-actions">
             <button type="submit" class="btn btn-primary">Save goals</button>
@@ -60,10 +63,10 @@
         <label class="select" id="range-wrap">
           <span class="visually-hidden">Date range</span>
           <select id="range">
-            <option value="14">Last 14 days</option>
+            <option value="7">Last 7 days</option>
             <option value="30" selected>Last 30 days</option>
-            <option value="60">Last 60 days</option>
             <option value="90">Last 90 days</option>
+            <option value="365">Last year</option>
           </select>
         </label>
         <span id="scope-note" class="muted small"></span>

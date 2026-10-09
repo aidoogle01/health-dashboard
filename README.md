@@ -3,20 +3,32 @@
 A self-hosted dashboard that pulls nutrition, sleep, recovery, and activity data
 from your three services on a schedule and updates the page live (no refresh).
 
-It is built to help you move the numbers, not just show them. There are four views:
+It is built to help you move the numbers, not just show them. The design follows
+the UX research in [`reports/Health dashboard UX and Oura design.md`](../../reports/Health%20dashboard%20UX%20and%20Oura%20design.md):
+compare yourself with your own usual range, forgive missed days, show how sure
+each insight is, and turn insights into small experiments.
 
-- **Today**: up to four suggestions for the day (for example "2,100 steps behind pace", "Make today an easy day",
-  "Bedtime is drifting later"), progress bars toward each goal with a pace marker
-  for the time of day, and recovery signals against your 30-day baseline.
-- **Habits**: a grid of which goals you hit each day, with hit rate and streaks, plus
-  each night's bedtime and wake time against your target bedtime.
-- **Insights**: next-morning readiness, sleep score or HRV on days with each habit
-  compared with days without it (late nights, hard training, 10K steps, protein,
-  overeating). Also a week-in-review table and your running calorie surplus or deficit.
-- **Trends**: daily charts with 7-day averages and goal lines, plus recent Garmin activities.
+- **Today**: one main focus for the day (Oura's "One Big Thing" pattern), with
+  low days explained in four steps: the fact, a likely reason, one action, and
+  reassurance. Goal bars with a pace marker and a "3 of 5 days this week" line.
+  Recovery signals labelled *Higher than usual*, *Within your usual* or *Lower
+  than usual* against the middle 80% of your last 30 days.
+- **Habits**: weekly goals ("5 of 7 days") with spare days built in. Days with
+  no data never count against you, and a streak shows only while it's alive.
+  Each night's bedtime and wake time against your target window.
+- **Insights**: next-morning readiness, sleep score or HRV after days with each
+  habit vs without. Each habit needs 10 days on each side before it is shown,
+  and comes with a 95% range, a confidence word and other differences between
+  the groups. A **Try for 2 weeks** experiment button compares the result with
+  the two weeks before ("inconclusive" is a valid result). Also a week in
+  review that leads with wins, and nutrition as 7-day averages against a range,
+  not a running deficit.
+- **Trends**: daily dots, 7-day averages, goal lines and your usual-range band.
+  Each recent activity shows how recovered you were the next morning.
 
-Goals (sleep, bedtime, steps, protein, calories, weekly intensity minutes) are
-editable from the **Goals** button and saved on the server.
+Goals (sleep, bedtime, steps, protein, fibre, calories, days per week, weekly
+intensity) are editable from the **Goals** button. Calories can be hidden
+entirely.
 
 ## How the auto-updating works
 
@@ -106,8 +118,9 @@ and lose saved tokens. A small always-on VM or a paid instance with a disk works
 
 | Method | Path | |
 |---|---|---|
-| GET | `/api/dashboard?days=90` | Days, activities, source status, goals |
+| GET | `/api/dashboard?days=365` | Days, activities, source status, goals, experiments |
 | GET / PUT | `/api/goals` | Read or replace your goals |
+| POST / DELETE | `/api/experiments[/:id]` | Start or remove a two-week experiment |
 | GET | `/api/stream` | Server-sent `update` events |
 | POST | `/api/sync` | `{"source":"oura"\|"garmin"\|"mfp"}` or `{}` for all |
 | POST | `/api/import/mfp` | MyFitnessPal CSV body (`Content-Type: text/csv`) |

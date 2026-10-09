@@ -24,6 +24,8 @@
   --pos: #2a78d6;
   --neg: #e34948;
   /* Habit grid: ordinal blue steps, "missed" sits near the surface. */
+  /* Your usual range: a quiet neutral band, never a status color. */
+  --usual: rgba(82, 81, 78, 0.1);
   --heat-0: #e9e8e3;
   --heat-1: #b7d3f6;
   --heat-2: #6da7ec;
@@ -53,6 +55,7 @@
     --band: rgba(12, 163, 12, 0.22);
     --pos: #3987e5;
     --neg: #e66767;
+    --usual: rgba(195, 194, 183, 0.12);
     --heat-0: #2c2c2a;
     --heat-1: #184f95;
     --heat-2: #2a78d6;
@@ -80,6 +83,7 @@
   --band: rgba(12, 163, 12, 0.22);
   --pos: #3987e5;
   --neg: #e66767;
+  --usual: rgba(195, 194, 183, 0.12);
   --heat-0: #2c2c2a;
   --heat-1: #184f95;
   --heat-2: #2a78d6;
@@ -234,7 +238,7 @@ table.data .num { text-align: right; font-variant-numeric: tabular-nums; }
 .bullet-track { position: relative; height: 10px; border-radius: 5px; background: var(--track); }
 .bullet-band { position: absolute; top: 0; bottom: 0; background: var(--band); }
 .bullet-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; background: var(--accent); }
-.bullet-fill.over { background: var(--status-serious); }
+.bullet-fill.over { background: var(--status-warning); }
 .bullet-target { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; background: var(--text-primary); border-radius: 1px; }
 .bullet-pace { position: absolute; top: -7px; width: 0; height: 0; margin-left: -4px; border: 4px solid transparent; border-top: 5px solid var(--text-muted); }
 
@@ -262,7 +266,7 @@ table.data .num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Diverging bars */
 .diverge { display: grid; gap: 4px; }
-.diverge-row, .diverge-axis { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 84px; gap: 12px; align-items: center; }
+.diverge-row, .diverge-axis { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 120px; gap: 12px; align-items: center; }
 .diverge-row { padding: 6px 0; border-bottom: 1px solid var(--grid); }
 .diverge-row:last-child { border-bottom: 0; }
 .diverge-label { display: grid; gap: 1px; font-size: 13px; min-width: 0; }
@@ -273,7 +277,7 @@ table.data .num { text-align: right; font-variant-numeric: tabular-nums; }
 .diverge-bar.pos { background: var(--pos); border-radius: 0 4px 4px 0; }
 .diverge-bar.neg { background: var(--neg); border-radius: 4px 0 0 4px; }
 .diverge-value { font-size: 13px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.diverge-value.muted { font-weight: 400; font-size: 12px; }
+.diverge-value.muted { font-weight: 400; font-size: 12px; white-space: normal; text-align: right; }
 
 /* Week in review */
 .hit-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 8px; }
@@ -290,6 +294,66 @@ table.review td:first-child { color: var(--text-secondary); }
 .goals-fields input { font: inherit; height: 34px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--page); color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .goals-fields .hint { font-size: 11px; color: var(--text-muted); }
 .goals-actions { display: flex; gap: 8px; margin-top: 14px; }
+
+/* Today's focus: one main thing, Oura-style */
+.focus-card { display: grid; gap: 12px; align-content: start; }
+.focus-card .card-head { margin-bottom: 0; }
+.focus-main { display: grid; gap: 6px; padding: 14px 16px; border-radius: 10px; background: var(--hover); }
+.focus-main h3 { margin: 0; font-size: 18px; font-weight: 600; text-wrap: balance; }
+.focus-main p { margin: 0; color: var(--text-secondary); max-width: 62ch; }
+.focus-title { display: flex; align-items: center; gap: 8px; }
+.focus-exp { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+.focus-exp strong { color: var(--text-primary); }
+.exp-tag { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--accent); }
+
+/* Usual-range vocabulary */
+.usual-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+.usual-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--axis); margin: 0 4px; }
+.band-word { font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-left: 8px; }
+.key-band { width: 14px; height: 10px; border-radius: 2px; background: var(--usual); box-shadow: inset 0 0 0 1px var(--grid); }
+.key-ci { width: 16px; height: 6px; border: 1.5px solid var(--text-primary); border-top: 0; border-bottom: 0; position: relative; }
+.key-ci::after { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 1.5px; background: var(--text-primary); }
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 4px 0 8px; }
+.section-head .section-title { margin: 0; }
+
+/* Evidence rows */
+.diverge-ci { position: absolute; top: 50%; height: 0; border-top: 1.5px solid var(--text-primary); }
+.diverge-ci::before, .diverge-ci::after { content: ''; position: absolute; top: -6px; height: 10px; border-left: 1.5px solid var(--text-primary); }
+.diverge-ci::before { left: 0; }
+.diverge-ci::after { right: 0; }
+.diverge-value { display: grid; justify-items: end; gap: 2px; }
+.confidence { font-size: 11px; font-weight: 500; color: var(--text-muted); }
+.confidence.c-high { color: var(--text-primary); }
+.diverge-row.pending .diverge-label > span:first-child { color: var(--text-secondary); }
+.need-track { position: absolute; left: 0; right: 0; top: 5px; height: 4px; border-radius: 2px; background: var(--grid); }
+.need-fill { height: 100%; border-radius: 2px; background: var(--axis); }
+.try-btn { justify-self: start; margin-top: 4px; font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-primary); cursor: pointer; }
+.try-btn:hover { background: var(--hover); }
+.try-btn:disabled { color: var(--text-muted); cursor: default; }
+
+/* Experiments */
+.exp-list { display: grid; gap: 14px; }
+.exp { display: grid; gap: 6px; }
+.exp p { margin: 0; color: var(--text-secondary); max-width: 80ch; }
+.exp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.exp-track { height: 6px; border-radius: 3px; background: var(--track); }
+.exp-fill { height: 100%; border-radius: 3px; background: var(--accent); }
+
+/* Week in review */
+.wins { list-style: none; margin: 0 0 4px; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.wins li { display: flex; align-items: center; gap: 8px; }
+.prompts { display: grid; gap: 6px; justify-items: start; padding: 10px 12px; border-radius: 8px; background: var(--hover); margin-top: 8px; }
+.prompts p { margin: 0; color: var(--text-secondary); }
+.prompts .mini-title { margin: 0; }
+.btn-sm { height: 28px; font-size: 12px; padding: 0 10px; }
+.week-done { display: inline-flex; align-items: center; gap: 5px; }
+
+/* Small multiples inside a card */
+.multiple + .multiple { margin-top: 6px; border-top: 1px solid var(--grid); padding-top: 8px; }
+.multiple-title { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
+.goals-fields label.check { grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; color: var(--text-primary); }
+.goals-fields label.check .hint { grid-column: 1 / -1; }
+.goals-fields input[type='checkbox'] { width: 18px; height: 18px; padding: 0; }
 
 @media (max-width: 520px) {
   .diverge-row, .diverge-axis { grid-template-columns: minmax(0, 1fr) 72px; }

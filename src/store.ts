@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { DEFAULT_GOALS, type Activity, type DayRecord, type Goals, type SourceId } from './types.js';
+import { DEFAULT_GOALS, type Activity, type DayRecord, type Experiment, type Goals, type SourceId } from './types.js';
 
 interface StoreData {
   days: Record<string, DayRecord>;
@@ -8,6 +8,7 @@ interface StoreData {
   /** Rotating credentials (Oura refresh token, Garmin session) so restarts don't re-login. */
   secrets: Record<string, unknown>;
   goals?: Partial<Goals>;
+  experiments?: Experiment[];
 }
 
 const MAX_ACTIVITIES = 200;
@@ -31,6 +32,7 @@ export class Store {
         activities: raw.activities ?? [],
         secrets: raw.secrets ?? {},
         ...(raw.goals ? { goals: raw.goals } : {}),
+        ...(raw.experiments ? { experiments: raw.experiments } : {}),
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -87,6 +89,22 @@ export class Store {
   async setGoals(goals: Goals) {
     this.data.goals = goals;
     await this.persist();
+  }
+
+  getExperiments(): Experiment[] {
+    return this.data.experiments ?? [];
+  }
+
+  async addExperiment(exp: Experiment) {
+    this.data.experiments = [...this.getExperiments(), exp];
+    await this.persist();
+  }
+
+  async removeExperiment(id: string): Promise<boolean> {
+    const before = this.getExperiments();
+    this.data.experiments = before.filter((e) => e.id !== id);
+    await this.persist();
+    return this.data.experiments.length !== before.length;
   }
 
   getSecret<T>(key: string): T | undefined {

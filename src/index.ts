@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
@@ -82,6 +82,7 @@ server.get('/api/dashboard', async (request) => {
     activities: store.getActivities(start),
     sources: scheduler.statuses(),
     goals: store.getGoals(),
+    experiments: store.getExperiments(),
   };
 });
 
@@ -90,12 +91,36 @@ const GoalsBody = z.object({
   bedtimeMin: z.number().int().min(-360).max(240),
   steps: z.number().int().min(500).max(50000),
   protein: z.number().int().min(10).max(400),
+  fiber: z.number().int().min(5).max(100),
   calories: z.number().int().min(800).max(6000),
   calorieTolerancePct: z.number().min(2).max(30),
   intensityWeekly: z.number().int().min(0).max(1500),
+  daysPerWeek: z.number().int().min(1).max(7),
+  showCalories: z.boolean(),
 });
 
 server.get('/api/goals', async () => store.getGoals());
+
+const ExperimentBody = z.object({
+  behaviourId: z.string().min(1).max(40),
+  outcome: z.enum(['readiness', 'sleepScore', 'hrv']),
+  start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+
+server.post('/api/experiments', async (request, reply) => {
+  const parsed = ExperimentBody.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.errors[0]?.message ?? 'Invalid experiment' });
+  const exp = { id: randomUUID(), ...parsed.data };
+  await store.addExperiment(exp);
+  scheduler.emit('update', { source: 'experiments' });
+  return reply.status(201).send(exp);
+});
+
+server.delete<{ Params: { id: string } }>('/api/experiments/:id', async (request, reply) => {
+  if (!(await store.removeExperiment(request.params.id))) return reply.status(404).send({ error: 'Experiment not found' });
+  scheduler.emit('update', { source: 'experiments' });
+  return reply.status(204).send();
+});
 
 server.put('/api/goals', async (request, reply) => {
   const parsed = GoalsBody.safeParse(request.body);
