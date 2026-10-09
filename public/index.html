@@ -19,6 +19,7 @@
         </div>
         <div class="controls" role="group" aria-label="Dashboard controls">
           <button id="sync" type="button" class="btn">Sync now</button>
+          <button id="connections-toggle" type="button" class="btn btn-ghost" aria-expanded="false" aria-controls="connections-panel">Connections</button>
           <button id="goals-toggle" type="button" class="btn btn-ghost" aria-expanded="false" aria-controls="goals-panel">Goals</button>
           <label class="btn btn-ghost" title="Import a MyFitnessPal nutrition CSV export">
             Import MFP CSV
@@ -26,6 +27,17 @@
           </label>
         </div>
       </header>
+
+      <section id="connections-panel" class="card connections-panel" hidden aria-label="Connections">
+        <div class="card-head">
+          <div>
+            <h2>Connections</h2>
+            <div class="muted small">Link your accounts once. The dashboard keeps them in sync from then on.</div>
+          </div>
+          <button type="button" id="connections-close" class="link">Close</button>
+        </div>
+        <div id="connections-body" class="connections"></div>
+      </section>
 
       <section id="goals-panel" class="card goals-panel" hidden aria-label="Your goals">
         <form id="goals-form">

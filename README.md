@@ -45,52 +45,62 @@ because data often arrives late (last night's sleep, meals you log afterwards).
 When a sync finishes, the server pushes an event and every open dashboard
 reloads its data. **Sync now** starts an immediate sync.
 
-## Quick start
+## Set up your real data (cloud, always on)
 
+This takes about 20 minutes. You need a [Railway](https://railway.com) account (Hobby plan, about $5/month),
+an active Oura Membership (Oura's API requires it), and your Garmin and MyFitnessPal logins.
+
+### 1. Deploy to Railway
+1. In Railway, choose **New Project → Deploy from GitHub repo** and pick `aidoogle01/meals.ai`.
+2. Open the new service's **Settings**:
+   - **Source → Branch**: the branch this code is on (`main` once merged).
+   - **Config-as-code → Railway config file**: `/apps/dashboard/railway.json`.
+     This makes Railway build `apps/dashboard/Dockerfile` from the repo root.
+3. **Add a volume** (right-click the service, or ⌘K → "Volume") and mount it at **`/data`**.
+   This is where your synced data and sign-in sessions live; without it every redeploy forgets them.
+4. **Settings → Networking → Generate Domain**. Copy the address, e.g. `https://meals-dashboard.up.railway.app`.
+5. **Variables**: add
+   | Name | Value |
+   |---|---|
+   | `DASHBOARD_PASSWORD` | a long password you'll use to open the dashboard (required; the app won't start without it) |
+   | `PUBLIC_URL` | the domain from step 4 |
+6. Deploy. Open the domain and sign in with any username and your `DASHBOARD_PASSWORD`.
+   You'll see sample data and a **Connect accounts** button.
+
+### 2. Connect Oura (official API, OAuth)
+Oura retired personal access tokens at the end of 2025, so you register a free personal app once:
+1. Go to <https://cloud.ouraring.com/oauth/applications> → **New application**.
+2. Set the **Redirect URI** to `<PUBLIC_URL>/auth/oura/callback` (exact match, https).
+3. Copy the **Client ID** and **Client Secret** into Railway variables `OURA_CLIENT_ID` and `OURA_CLIENT_SECRET`. Railway redeploys.
+4. In the dashboard, **Connections → Connect Oura**, approve on Oura's page, and you're sent back. The first sync pulls 90 days.
+
+### 3. Connect Garmin
+**Connections → Garmin**: enter your Garmin email and password. If your account uses two-step
+verification, a code box appears; enter the code Garmin emails or texts you. Your password is used
+once and never stored; the session Garmin issues is kept on your volume and refreshed automatically.
+
+Garmin has no personal API, so this uses the community-maintained
+[python-garminconnect](https://github.com/cyberjunky/python-garminconnect). Garmin occasionally changes its
+sign-in; if the Garmin chip shows an error, bump the version in `connectors/requirements.txt` and redeploy.
+
+### 4. Connect MyFitnessPal
+**Connections → MyFitnessPal**: enter your username and paste your browser's cookie (the panel shows
+how to copy it). Leave the cookie empty if your diary is public (MyFitnessPal → Settings → Diary
+Settings → Diary Sharing). **Test and connect** checks it can read today's diary before saving.
+The cookie lasts about a month; the chip tells you when to paste a fresh one.
+
+MyFitnessPal has no public API and challenges traffic from cloud servers more than home connections.
+If it blocks your server, use **Import MFP CSV** with the export from MyFitnessPal Premium
+(Settings → Export data) for history.
+
+### Run it on your own computer instead
 ```bash
 pnpm install --filter @mealwise/dashboard
-cp apps/dashboard/.env.example apps/dashboard/.env   # fill in what you have
-cd apps/dashboard && node --env-file=.env --import tsx src/index.ts
-# open http://localhost:3100
+python3 -m venv .venv && .venv/bin/pip install -r apps/dashboard/connectors/requirements.txt
+cp apps/dashboard/.env.example apps/dashboard/.env   # set DASHBOARD_PASSWORD and the Oura app keys
+cd apps/dashboard && PYTHON_BIN=../../.venv/bin/python node --env-file=.env --import tsx src/index.ts
+# open http://localhost:3100 (Oura redirect URI: http://localhost:3100/auth/oura/callback)
 ```
-
-With no credentials set, the dashboard runs on **demo data**, so you can see it
-working right away. Any source you connect switches to real data. The others stay
-on demo data only if `DEMO_MODE=true`.
-
-## Connecting each source
-
-### Oura Ring (official API)
-1. Option A: create a token at <https://cloud.ouraring.com/personal-access-tokens>
-   and set `OURA_ACCESS_TOKEN`.
-2. Option B (OAuth, which Oura is moving to): register an app at
-   <https://cloud.ouraring.com/oauth/applications>, complete the authorization
-   once, then set `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET` and
-   `OURA_REFRESH_TOKEN`. Oura refresh tokens can only be used once, so the
-   dashboard saves each new token in `DATA_DIR`. Keep that directory between
-   restarts.
-
-### Garmin (unofficial)
-Garmin's official Health API is open only to approved business partners. This
-connector signs in to Garmin Connect the way the website does, using
-[`garmin-connect`](https://www.npmjs.com/package/garmin-connect). Set
-`GARMIN_EMAIL` and `GARMIN_PASSWORD`.
-- The session is cached in `DATA_DIR`, so the dashboard only signs in again when
-  the session expires. Garmin may block accounts that sign in too often.
-- **Accounts with two-factor authentication (MFA) are not supported** by the library.
-- Garmin can change its login flow without notice. If the Garmin chip shows a
-  sign-in error, update the `garmin-connect` package first.
-
-### MyFitnessPal (no public API)
-MyFitnessPal closed its API to new developers. There are two ways in:
-1. **Live sync (diary page)**: set `MFP_USERNAME`. If your diary is private,
-   also set `MFP_COOKIE`: copy the whole `Cookie` request header from a
-   logged-in browser (DevTools → Network → any myfitnesspal.com request). The
-   cookie expires after a while. When it does, the chip shows *"session
-   expired"* and you paste a new one.
-2. **CSV import**: export your data (MyFitnessPal Premium → *Export data*), then
-   click **Import MFP CSV** and pick the *Nutrition Summary* file. Use this to
-   load history, or as a fallback if the diary page changes.
 
 ## Configuration
 
@@ -112,7 +122,7 @@ docker run -p 3100:3100 --env-file apps/dashboard/.env -v dashboard-data:/data h
 
 It must run on a host that **stays on**, with a **persistent disk** mounted at
 `/data`. Free tiers that sleep when idle (such as Render free) stop the scheduler
-and lose saved tokens. A small always-on VM or a paid instance with a disk works.
+and lose saved sign-ins. See "Set up your real data" above for Railway.
 
 ## API
 
@@ -121,6 +131,11 @@ and lose saved tokens. A small always-on VM or a paid instance with a disk works
 | GET | `/api/dashboard?days=365` | Days, activities, source status, goals, experiments |
 | GET / PUT | `/api/goals` | Read or replace your goals |
 | POST / DELETE | `/api/experiments[/:id]` | Start or remove a two-week experiment |
+| GET | `/api/connections` | Which sources are connected (never returns credentials) |
+| GET | `/auth/oura/start`, `/auth/oura/callback` | Oura OAuth sign-in |
+| POST | `/api/connect/garmin`, `/api/connect/garmin/code` | Garmin sign-in, then verification code if asked |
+| POST | `/api/connect/mfp` | Save a MyFitnessPal username and cookie after a test read |
+| DELETE | `/api/connect/:source` | Disconnect `oura`, `garmin` or `mfp` |
 | GET | `/api/stream` | Server-sent `update` events |
 | POST | `/api/sync` | `{"source":"oura"\|"garmin"\|"mfp"}` or `{}` for all |
 | POST | `/api/import/mfp` | MyFitnessPal CSV body (`Content-Type: text/csv`) |

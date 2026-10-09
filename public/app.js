@@ -366,7 +366,18 @@ function renderToday(days, goals, experiments) {
     ),
   );
 
+  const allSample = state.data.sources.every((s) => s.demo);
+  const banner = allSample
+    ? h(
+        'div',
+        { class: 'connect-banner' },
+        h('p', {}, h('strong', { text: "You're looking at sample data. " }), 'Connect Oura, Garmin and MyFitnessPal to see your own.'),
+        h('button', { type: 'button', class: 'btn btn-primary', text: 'Connect accounts', onclick: () => toggleConnections(true) }),
+      )
+    : null;
+
   $('#panel-today').replaceChildren(
+    ...(banner ? [banner] : []),
     rings,
     h('div', { class: 'grid-2' }, focus, progress),
     h('div', { class: 'section-head' }, h('h3', { class: 'section-title', text: 'Recovery signals' }), h('span', { class: 'muted small', text: 'Compared with your usual range: the middle 80% of your last 30 days' })),
@@ -811,6 +822,213 @@ $('#goals-form').addEventListener('submit', async (e) => {
   render();
 });
 
+// ── Connections panel ────────────────────────────────────
+const connState = { garminNeedsCode: false, errors: {} };
+
+async function api(method, url, body) {
+  const res = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined }).catch(() => null);
+  if (!res) throw new Error('The server could not be reached');
+  const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+  return data;
+}
+
+function connState_(connected, text) {
+  return h('span', { class: 'conn-state' }, statusIcon(connected ? 'good' : 'info'), text);
+}
+
+function sourceStatus(id) {
+  const s = state.data?.sources.find((x) => x.id === id);
+  if (!s || s.demo) return null;
+  if (s.lastError) return h('p', { class: 'err', text: s.lastError });
+  if (s.syncing) return h('p', { text: 'Syncing now…' });
+  return s.lastSuccessAt ? h('p', { text: `Last synced ${fmtAgo(s.lastSuccessAt)}` }) : null;
+}
+
+function disconnectButton(id, label) {
+  return h('button', {
+    type: 'button',
+    class: 'btn btn-ghost btn-sm',
+    text: 'Disconnect',
+    onclick: async (e) => {
+      e.currentTarget.disabled = true;
+      await api('DELETE', `/api/connect/${id}`).catch((err) => notify(err.message));
+      notify(`${label} disconnected`);
+      await renderConnections();
+      load();
+    },
+  });
+}
+
+function errLine(id) {
+  return connState.errors[id] ? h('p', { class: 'err', role: 'alert', text: connState.errors[id] }) : null;
+}
+
+async function renderConnections() {
+  const body = $('#connections-body');
+  let c;
+  try {
+    c = await api('GET', '/api/connections');
+  } catch (err) {
+    body.replaceChildren(h('p', { class: 'err', text: err.message }));
+    return;
+  }
+  if (c.preview) {
+    body.replaceChildren(h('p', { class: 'muted', text: 'This preview runs on sample data, so there is nothing to connect here. Connections work on your own deployed dashboard (see the README).' }));
+    return;
+  }
+
+  // Oura: OAuth sign-in
+  const ouraCard = h('div', { class: 'conn', style: { '--pillar': 'var(--recovery)' } }, h('div', { class: 'conn-head' }, h('strong', {}, h('i', { class: 'pillar-dot' }), 'Oura Ring'), connState_(c.oura.connected || c.oura.viaEnv, c.oura.connected || c.oura.viaEnv ? 'Connected' : 'Not connected')));
+  if (c.oura.connected) ouraCard.append(sourceStatus('oura'), h('div', { class: 'actions' }, disconnectButton('oura', 'Oura')));
+  else if (c.oura.canConnect) {
+    ouraCard.append(
+      h('p', { text: "You'll sign in on Oura's site and approve read-only access to your sleep, readiness and activity." }),
+      h('div', { class: 'actions' }, h('a', { class: 'btn btn-primary', href: '/auth/oura/start', text: 'Connect Oura' })),
+    );
+  } else {
+    ouraCard.append(
+      h('p', { text: 'Oura needs a one-time app registration before the Connect button works.' }),
+      h(
+        'details',
+        {},
+        h('summary', { text: 'How to set it up (5 minutes)' }),
+        h(
+          'ol',
+          {},
+          h('li', {}, 'Go to cloud.ouraring.com/oauth/applications and create an application.'),
+          h('li', {}, 'Set the redirect URI to ', h('code', { text: `${location.origin}/auth/oura/callback` }), '.'),
+          h('li', {}, 'Copy the Client ID and Client Secret into your host as ', h('code', { text: 'OURA_CLIENT_ID' }), ' and ', h('code', { text: 'OURA_CLIENT_SECRET' }), ', then redeploy.'),
+        ),
+      ),
+    );
+  }
+
+  // Garmin: email + password, then an optional code
+  const garminCard = h('div', { class: 'conn', style: { '--pillar': 'var(--activity)' } }, h('div', { class: 'conn-head' }, h('strong', {}, h('i', { class: 'pillar-dot' }), 'Garmin'), connState_(c.garmin.connected, c.garmin.connected ? 'Connected' : 'Not connected')));
+  if (c.garmin.connected) garminCard.append(sourceStatus('garmin'), h('div', { class: 'actions' }, disconnectButton('garmin', 'Garmin')));
+  else if (connState.garminNeedsCode) {
+    const form = h(
+      'form',
+      {},
+      h('p', { text: 'Garmin sent a verification code to your email or authenticator app.' }),
+      h('label', {}, 'Verification code', h('input', { id: 'garmin-code', name: 'code', inputmode: 'numeric', autocomplete: 'one-time-code', required: true })),
+      errLine('garmin'),
+      h('div', { class: 'actions' }, h('button', { type: 'submit', class: 'btn btn-primary btn-sm', text: 'Verify' })),
+    );
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      form.querySelector('button').disabled = true;
+      try {
+        await api('POST', '/api/connect/garmin/code', { code: form.code.value });
+        connState.garminNeedsCode = false;
+        connState.errors.garmin = undefined;
+        notify('Garmin connected. First sync is running');
+      } catch (err) {
+        connState.errors.garmin = err.message;
+      }
+      await renderConnections();
+      load();
+    });
+    garminCard.append(form);
+  } else {
+    const form = h(
+      'form',
+      {},
+      h('p', { text: 'Your password is used once to sign in and is never stored. Only the session Garmin issues is kept.' }),
+      h('label', {}, 'Garmin email', h('input', { id: 'garmin-email', name: 'email', type: 'email', autocomplete: 'username', required: true })),
+      h('label', {}, 'Password', h('input', { id: 'garmin-password', name: 'password', type: 'password', autocomplete: 'current-password', required: true })),
+      errLine('garmin'),
+      h('div', { class: 'actions' }, h('button', { type: 'submit', class: 'btn btn-primary btn-sm', text: 'Connect Garmin' }), h('span', { class: 'muted small', text: 'Sign-in can take up to a minute' })),
+    );
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      form.querySelector('button').disabled = true;
+      try {
+        const r = await api('POST', '/api/connect/garmin', { email: form.email.value, password: form.password.value });
+        connState.garminNeedsCode = r.status === 'needs_mfa';
+        connState.errors.garmin = undefined;
+        if (r.status === 'ok') notify('Garmin connected. First sync is running');
+      } catch (err) {
+        connState.errors.garmin = err.message;
+      }
+      await renderConnections();
+      load();
+    });
+    garminCard.append(form);
+  }
+
+  // MyFitnessPal: username + browser cookie
+  const mfpCard = h('div', { class: 'conn', style: { '--pillar': 'var(--nutrition)' } }, h('div', { class: 'conn-head' }, h('strong', {}, h('i', { class: 'pillar-dot' }), 'MyFitnessPal'), connState_(c.mfp.connected, c.mfp.importedOnly ? 'CSV imported' : c.mfp.connected ? `Connected as ${c.mfp.username}` : 'Not connected')));
+  if (c.mfp.connected && !c.mfp.importedOnly) mfpCard.append(sourceStatus('mfp'), h('div', { class: 'actions' }, disconnectButton('mfp', 'MyFitnessPal')));
+  else {
+    const form = h(
+      'form',
+      {},
+      h('p', { text: "MyFitnessPal has no public API, so the dashboard reads your food diary page using your browser's sign-in." }),
+      h('label', {}, 'MyFitnessPal username', h('input', { id: 'mfp-username', name: 'username', autocomplete: 'off', required: true })),
+      h('label', {}, 'Cookie (leave empty if your diary is public)', h('textarea', { id: 'mfp-cookie', name: 'cookie', spellcheck: 'false', placeholder: 'Paste the whole Cookie value here' })),
+      h(
+        'details',
+        {},
+        h('summary', { text: 'How to copy your cookie' }),
+        h(
+          'ol',
+          {},
+          h('li', {}, 'On a computer, sign in at myfitnesspal.com in Chrome, Edge or Firefox and open your Food Diary.'),
+          h('li', {}, 'Open developer tools (F12, or Cmd+Option+I on Mac) and pick the Network tab, then reload the page.'),
+          h('li', {}, 'Click the first request (it starts with "diary"), find ', h('code', { text: 'Cookie' }), ' under Request Headers, and copy its whole value.'),
+          h('li', {}, 'Paste it above. It lasts about a month; the dashboard will tell you when to paste a new one.'),
+        ),
+      ),
+      errLine('mfp'),
+      h('div', { class: 'actions' }, h('button', { type: 'submit', class: 'btn btn-primary btn-sm', text: 'Test and connect' })),
+    );
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      form.querySelector('button').disabled = true;
+      try {
+        await api('POST', '/api/connect/mfp', { username: form.username.value, cookie: form.cookie.value });
+        connState.errors.mfp = undefined;
+        notify('MyFitnessPal connected. First sync is running');
+      } catch (err) {
+        connState.errors.mfp = err.message;
+      }
+      await renderConnections();
+      load();
+    });
+    mfpCard.append(form, h('p', { class: 'small', text: 'If MyFitnessPal blocks your server, use Import MFP CSV at the top instead (needs Premium).' }));
+  }
+
+  body.replaceChildren(ouraCard, garminCard, mfpCard);
+}
+
+function toggleConnections(open) {
+  $('#connections-panel').hidden = !open;
+  $('#connections-toggle').setAttribute('aria-expanded', String(open));
+  if (open) {
+    renderConnections();
+    $('#connections-panel').scrollIntoView({ block: 'nearest' });
+  }
+}
+$('#connections-toggle').addEventListener('click', () => toggleConnections($('#connections-panel').hidden));
+$('#connections-close').addEventListener('click', () => toggleConnections(false));
+
+// Coming back from the Oura sign-in page.
+function handleConnectReturn() {
+  const params = new URLSearchParams(location.search);
+  const result = params.get('connect');
+  if (result) {
+    notify(result === 'oura' ? 'Oura connected. First sync is running' : 'Oura sign-in did not complete. Try again');
+    try {
+      history.replaceState(null, '', location.pathname + location.hash);
+    } catch {
+      /* sandboxed frame */
+    }
+    toggleConnections(true);
+  }
+}
+
 let inflight = null;
 function load() {
   if (inflight) return inflight;
@@ -909,3 +1127,4 @@ setInterval(() => {
 render();
 load();
 connectStream();
+handleConnectReturn();

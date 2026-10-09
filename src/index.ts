@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
@@ -6,38 +6,40 @@ import fastifyStatic from '@fastify/static';
 import { z } from 'zod';
 import { loadConfig } from './config.js';
 import { addDays, today } from './lib/dates.js';
+import { PythonBridge } from './lib/python-bridge.js';
 import { SyncScheduler, type ScheduledSource } from './scheduler.js';
 import { DemoSource } from './sources/demo.js';
 import { GarminSource } from './sources/garmin.js';
 import { MfpSource, parseMfpCsv } from './sources/myfitnesspal.js';
 import { OuraSource } from './sources/oura.js';
 import { Store } from './store.js';
-import type { SourceAdapter } from './types.js';
 
 const config = loadConfig();
 const store = new Store(config.DATA_DIR);
 await store.load();
 
-const server = Fastify({ logger: { level: config.LOG_LEVEL } });
+const server = Fastify({ logger: { level: config.LOG_LEVEL }, trustProxy: true });
 
-// Real adapters where credentials exist; demo data stands in for the rest when DEMO_MODE is on
-// (or when nothing at all is configured, so a fresh checkout shows a working dashboard).
-const real: Array<[SourceAdapter, number]> = [
-  [new OuraSource(config, store), config.OURA_SYNC_MINUTES],
-  [new GarminSource(config, store), config.GARMIN_SYNC_MINUTES],
-  [new MfpSource(config), config.MFP_SYNC_MINUTES],
+// Health data must never sit on the open internet: refuse to start a deployed instance without a password.
+if (process.env.NODE_ENV === 'production' && !config.DASHBOARD_PASSWORD) {
+  server.log.fatal('DASHBOARD_PASSWORD must be set in production. Add it to your host\'s environment variables.');
+  process.exit(1);
+}
+
+const bridge = new PythonBridge(undefined, (line) => server.log.debug({ connector: line }));
+const oura = new OuraSource(config, store);
+const garmin = new GarminSource(config, store, bridge);
+const mfp = new MfpSource(config, store, bridge);
+const sources: ScheduledSource[] = [
+  { adapter: oura, demo: new DemoSource('oura', oura.label), intervalMinutes: config.OURA_SYNC_MINUTES },
+  { adapter: garmin, demo: new DemoSource('garmin', garmin.label), intervalMinutes: config.GARMIN_SYNC_MINUTES },
+  { adapter: mfp, demo: new DemoSource('mfp', mfp.label), intervalMinutes: config.MFP_SYNC_MINUTES },
 ];
-const noneConfigured = real.every(([a]) => !a.configured());
-const useDemo = config.DEMO_MODE || noneConfigured;
-const sources: ScheduledSource[] = real.map(([adapter, intervalMinutes]) =>
-  adapter.configured() || !useDemo
-    ? { adapter, intervalMinutes, demo: false }
-    : { adapter: new DemoSource(adapter.id, adapter.label), intervalMinutes: 1, demo: true },
-);
 
 const scheduler = new SyncScheduler(sources, store, {
   backfillDays: config.BACKFILL_DAYS,
   resyncDays: config.RESYNC_DAYS,
+  demoMode: config.DEMO_MODE,
   log: server.log,
 });
 
@@ -143,9 +145,95 @@ server.post('/api/import/mfp', async (request, reply) => {
     return reply.status(415).send({ error: 'Send the MyFitnessPal CSV export with Content-Type: text/csv' });
   }
   const days = parseMfpCsv(request.body);
+  if (store.hasDemo('mfp')) await store.clearSource('mfp');
   await store.putDays('mfp', days);
-  scheduler.emit('update', { source: 'mfp' });
+  await store.setSecret('mfp.imported', true);
+  scheduler.refreshAll();
   return { imported: days.length };
+});
+
+// ── Connections ──────────────────────────────────────────
+// Credentials never come back out of these routes; only connection state does.
+
+server.get('/api/connections', async () => ({
+  oura: { connected: oura.connected(), canConnect: oura.canConnect(), viaEnv: !oura.connected() && oura.configured() },
+  garmin: { connected: garmin.connected(), viaEnv: !garmin.connected() && garmin.configured() },
+  mfp: { connected: mfp.configured(), username: mfp.username(), importedOnly: mfp.configured() && !mfp.username() },
+}));
+
+/** The address Oura sends people back to; must match the redirect URI registered on the Oura app. */
+const ouraRedirect = (request: { protocol: string; headers: Record<string, unknown> }) =>
+  `${config.PUBLIC_URL?.replace(/\/$/, '') ?? `${request.protocol}://${String(request.headers.host)}`}/auth/oura/callback`;
+const ouraStates = new Map<string, number>();
+
+server.get('/auth/oura/start', async (request, reply) => {
+  if (!oura.canConnect()) {
+    return reply.status(400).type('text/plain').send('Set OURA_CLIENT_ID and OURA_CLIENT_SECRET on your host first (see the README).');
+  }
+  const state = randomBytes(16).toString('hex');
+  ouraStates.set(state, Date.now() + 10 * 60_000);
+  return reply.redirect(oura.authorizeUrl(ouraRedirect(request), state));
+});
+
+server.get<{ Querystring: { code?: string; state?: string; error?: string } }>('/auth/oura/callback', async (request, reply) => {
+  const { code, state, error } = request.query;
+  const valid = state && (ouraStates.get(state) ?? 0) > Date.now();
+  if (state) ouraStates.delete(state);
+  if (error || !code || !valid) return reply.redirect(`/?connect=oura-failed#today`);
+  try {
+    await oura.exchangeCode(code, ouraRedirect(request));
+  } catch (err) {
+    request.log.warn({ err: (err as Error).message }, 'oura connect failed');
+    return reply.redirect(`/?connect=oura-failed#today`);
+  }
+  scheduler.refreshAll();
+  return reply.redirect(`/?connect=oura#today`);
+});
+
+const GarminLogin = z.object({ email: z.string().email(), password: z.string().min(1) });
+server.post('/api/connect/garmin', async (request, reply) => {
+  const body = GarminLogin.safeParse(request.body);
+  if (!body.success) return reply.status(400).send({ error: 'Enter your Garmin email and password' });
+  try {
+    const status = await garmin.login(body.data.email, body.data.password);
+    if (status === 'ok') scheduler.refreshAll();
+    return { status };
+  } catch (err) {
+    return reply.status(400).send({ error: `Garmin sign-in failed: ${(err as Error).message}` });
+  }
+});
+
+server.post('/api/connect/garmin/code', async (request, reply) => {
+  const body = z.object({ code: z.string().min(4).max(12) }).safeParse(request.body);
+  if (!body.success) return reply.status(400).send({ error: 'Enter the code Garmin sent you' });
+  try {
+    await garmin.verify(body.data.code);
+    scheduler.refreshAll();
+    return { status: 'ok' };
+  } catch (err) {
+    return reply.status(400).send({ error: `That code didn't work: ${(err as Error).message}` });
+  }
+});
+
+const MfpConnect = z.object({ username: z.string().min(1).max(100), cookie: z.string().max(20_000).optional() });
+server.post('/api/connect/mfp', async (request, reply) => {
+  const body = MfpConnect.safeParse(request.body);
+  if (!body.success) return reply.status(400).send({ error: 'Enter your MyFitnessPal username' });
+  try {
+    const todayTotals = await mfp.connect(body.data.username.trim(), body.data.cookie?.trim() || undefined);
+    scheduler.refreshAll();
+    return { status: 'ok', today: todayTotals };
+  } catch (err) {
+    return reply.status(400).send({ error: (err as Error).message });
+  }
+});
+
+server.delete<{ Params: { source: string } }>('/api/connect/:source', async (request, reply) => {
+  const target = { oura, garmin, mfp }[request.params.source as 'oura' | 'garmin' | 'mfp'];
+  if (!target) return reply.status(404).send({ error: 'Unknown source' });
+  await target.disconnect();
+  scheduler.refreshAll();
+  return reply.status(204).send();
 });
 
 // Server-sent events: the page refetches whenever a sync finishes, so it never needs reloading.
@@ -175,6 +263,7 @@ server.get('/api/stream', (request, reply) => {
 
 const shutdown = async () => {
   scheduler.stop();
+  bridge.stop();
   await server.close();
   process.exit(0);
 };
@@ -182,5 +271,4 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 await server.listen({ port: config.PORT, host: config.HOST });
-if (useDemo) server.log.info('Demo data is filling sources without credentials');
 scheduler.start();

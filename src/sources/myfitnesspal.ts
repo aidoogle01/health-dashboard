@@ -1,13 +1,19 @@
 import type { Config } from '../config.js';
 import { dateRange } from '../lib/dates.js';
+import type { PythonBridge } from '../lib/python-bridge.js';
+import type { Store } from '../store.js';
 import type { MfpDay, SourceAdapter, SyncResult } from '../types.js';
 
 /**
  * MyFitnessPal has no public API. This reads the food diary page the website
  * renders for a signed-in user (or for anyone, if the diary is public), using
- * the session cookie copied from a logged-in browser. For bulk history, the
- * CSV export can be imported instead (see parseMfpCsv).
+ * the session cookie copied from a logged-in browser. Pages are fetched through
+ * the Python connector helper, which presents a browser TLS fingerprint because
+ * MyFitnessPal blocks ordinary server clients. For bulk history, or if the site
+ * blocks your host, the CSV export can be imported instead (see parseMfpCsv).
  */
+
+const EXPIRED = 'MyFitnessPal sign-in expired or the diary is private. Paste a fresh cookie in the Connections panel';
 
 const COLUMN_MAP: Record<string, keyof MfpDay> = {
   calories: 'calories',
@@ -46,7 +52,7 @@ export class MfpSessionError extends Error {}
 /** Parse totals and daily goal from a diary page. Exported for tests. */
 export function parseMfpDiary(html: string): MfpDay {
   if (/<form[^>]+(id="fitnessLogin"|action="[^"]*\/account\/login)/.test(html) || /id="loginForm"/.test(html)) {
-    throw new MfpSessionError('MyFitnessPal session expired or diary is private — refresh MFP_COOKIE');
+    throw new MfpSessionError(EXPIRED);
   }
   const header = html.match(/<tfoot>([\s\S]*?)<\/tfoot>/)?.[1] ?? rowByClass(html, 'meal_header') ?? '';
   const columns = cells(header)
@@ -117,34 +123,71 @@ export function parseMfpCsv(csv: string): SyncResult['days'] {
   return [...totals].map(([date, data]) => ({ date, data: { ...data } }));
 }
 
+const ACCOUNT = 'mfp.account';
+
+interface MfpAccount {
+  username: string;
+  cookie?: string | undefined;
+}
+
 export class MfpSource implements SourceAdapter {
   readonly id = 'mfp' as const;
   readonly label = 'MyFitnessPal';
 
-  constructor(private readonly config: Config) {}
+  constructor(
+    private readonly config: Config,
+    private readonly store: Store,
+    private readonly bridge: PythonBridge,
+  ) {}
 
+  private account(): MfpAccount | undefined {
+    const saved = this.store.getSecret<MfpAccount>(ACCOUNT);
+    if (saved?.username) return saved;
+    return this.config.MFP_USERNAME ? { username: this.config.MFP_USERNAME, cookie: this.config.MFP_COOKIE } : undefined;
+  }
+
+  /** Connected with an account, or holding history imported from a CSV export. */
   configured(): boolean {
-    return Boolean(this.config.MFP_USERNAME);
+    return Boolean(this.account() || this.store.getSecret<boolean>('mfp.imported'));
+  }
+
+  username(): string | undefined {
+    return this.account()?.username;
+  }
+
+  /** Save an account after checking that today's diary can actually be read with it. */
+  async connect(username: string, cookie: string | undefined): Promise<MfpDay> {
+    const date = new Date().toISOString().slice(0, 10);
+    const [day] = await this.fetchDays({ username, cookie }, [date]);
+    await this.store.setSecret(ACCOUNT, { username, cookie });
+    return day?.data ?? {};
+  }
+
+  async disconnect(): Promise<void> {
+    await this.store.setSecret(ACCOUNT, undefined);
+    await this.store.setSecret('mfp.imported', undefined);
+  }
+
+  private async fetchDays(account: MfpAccount, dates: string[]): Promise<Array<{ date: string; data: MfpDay }>> {
+    const res = await this.bridge.call<{ pages: Array<{ date: string; status: number; url: string; html: string }> }>(
+      'mfp.fetch',
+      { username: account.username, cookie: account.cookie, dates },
+      300_000,
+    );
+    return res.pages.map((p) => {
+      if (/\/account\/login|\/login\b/.test(p.url) || p.status === 401) throw new MfpSessionError(EXPIRED);
+      if (p.status === 403 || /cf-chl|challenge-platform/.test(p.html)) {
+        throw new Error('MyFitnessPal blocked the request from this server. Import your CSV export instead, or try again later');
+      }
+      if (p.status >= 400) throw new Error(`MyFitnessPal diary request failed (${p.status})`);
+      return { date: p.date, data: parseMfpDiary(p.html) };
+    });
   }
 
   async sync(start: string, end: string): Promise<SyncResult> {
-    const user = encodeURIComponent(this.config.MFP_USERNAME ?? '');
-    const days: SyncResult['days'] = [];
-    for (const date of dateRange(start, end)) {
-      const res = await fetch(`https://www.myfitnesspal.com/food/diary/${user}?date=${date}`, {
-        headers: {
-          ...(this.config.MFP_COOKIE ? { Cookie: this.config.MFP_COOKIE } : {}),
-          'User-Agent': 'Mozilla/5.0 (compatible; meals.AI dashboard)',
-          Accept: 'text/html',
-        },
-        redirect: 'follow',
-      });
-      if (/\/account\/login/.test(res.url)) {
-        throw new MfpSessionError('MyFitnessPal session expired or diary is private — refresh MFP_COOKIE');
-      }
-      if (!res.ok) throw new Error(`MyFitnessPal diary request failed (${res.status})`);
-      days.push({ date, data: { ...parseMfpDiary(await res.text()) } });
-    }
-    return { days };
+    const account = this.account();
+    if (!account) return { days: [] }; // CSV-imported history only; nothing to fetch
+    const days = await this.fetchDays(account, dateRange(start, end));
+    return { days: days.map((d) => ({ date: d.date, data: { ...d.data } })) };
   }
 }

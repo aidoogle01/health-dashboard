@@ -5,6 +5,9 @@ import type { OuraDay, SourceAdapter, SyncResult } from '../types.js';
 
 const API = 'https://api.ouraring.com/v2/usercollection';
 const TOKEN_URL = 'https://api.ouraring.com/oauth/token';
+const AUTHORIZE_URL = 'https://cloud.ouraring.com/oauth/authorize';
+/** Read-only scopes covering scores, sleep periods and activity. */
+const SCOPES = 'personal daily heartrate session workout';
 
 interface OuraPage<T> {
   data: T[];
@@ -110,19 +113,46 @@ export class OuraSource implements SourceAdapter {
     return Boolean(this.config.OURA_CLIENT_ID && this.config.OURA_CLIENT_SECRET && this.refreshToken());
   }
 
+  /** True when the OAuth app credentials are set, so the "Connect Oura" button can work. */
+  canConnect(): boolean {
+    return Boolean(this.config.OURA_CLIENT_ID && this.config.OURA_CLIENT_SECRET);
+  }
+
+  connected(): boolean {
+    return Boolean(this.store.getSecret<string>('oura.accessToken'));
+  }
+
+  /** Where to send the browser to approve access. */
+  authorizeUrl(redirectUri: string, state: string): string {
+    const q = new URLSearchParams({ response_type: 'code', client_id: this.config.OURA_CLIENT_ID ?? '', redirect_uri: redirectUri, scope: SCOPES, state });
+    return `${AUTHORIZE_URL}?${q}`;
+  }
+
+  /** Swap the one-time code from the redirect for access and refresh tokens. */
+  async exchangeCode(code: string, redirectUri: string): Promise<void> {
+    await this.tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: redirectUri });
+  }
+
+  async disconnect(): Promise<void> {
+    await this.store.setSecret('oura.accessToken', undefined);
+    await this.store.setSecret('oura.refreshToken', undefined);
+  }
+
   /** OAuth refresh tokens are single-use, so the rotated one is persisted immediately. */
   private async refresh(): Promise<void> {
+    await this.tokenRequest({ grant_type: 'refresh_token', refresh_token: this.refreshToken() ?? '' });
+  }
+
+  private async tokenRequest(fields: Record<string, string>): Promise<void> {
     const res = await fetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: this.refreshToken() ?? '',
-        client_id: this.config.OURA_CLIENT_ID ?? '',
-        client_secret: this.config.OURA_CLIENT_SECRET ?? '',
-      }),
+      body: new URLSearchParams({ ...fields, client_id: this.config.OURA_CLIENT_ID ?? '', client_secret: this.config.OURA_CLIENT_SECRET ?? '' }),
     });
-    if (!res.ok) throw new Error(`Oura token refresh failed (${res.status})`);
+    if (!res.ok) {
+      if (fields.grant_type === 'refresh_token') await this.disconnect();
+      throw new Error(fields.grant_type === 'refresh_token' ? 'Oura sign-in expired. Connect Oura again' : `Oura sign-in failed (${res.status})`);
+    }
     const body = (await res.json()) as { access_token: string; refresh_token?: string };
     await this.store.setSecret('oura.accessToken', body.access_token);
     if (body.refresh_token) await this.store.setSecret('oura.refreshToken', body.refresh_token);
@@ -143,6 +173,8 @@ export class OuraSource implements SourceAdapter {
         await this.refresh();
         continue;
       }
+      if (res.status === 401) throw new Error('Oura sign-in expired. Connect Oura again');
+      if (res.status === 403) throw new Error('Oura refused access. API access needs an active Oura Membership');
       if (!res.ok) throw new Error(`Oura ${collection} request failed (${res.status})`);
       const page = (await res.json()) as OuraPage<T>;
       out.push(...page.data);

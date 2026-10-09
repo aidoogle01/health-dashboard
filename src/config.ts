@@ -22,20 +22,22 @@ const EnvSchema = z.object({
   // Fill unconfigured sources with generated sample data.
   DEMO_MODE: bool,
 
-  // Oura — personal access token or OAuth2 access token.
+  // Public address of the dashboard, e.g. https://health.example.up.railway.app (for the Oura sign-in redirect).
+  PUBLIC_URL: z.string().url().optional(),
+
+  // Oura — OAuth app credentials from cloud.ouraring.com/oauth/applications (personal tokens were retired end of 2025).
   OURA_ACCESS_TOKEN: z.string().optional(),
   OURA_CLIENT_ID: z.string().optional(),
   OURA_CLIENT_SECRET: z.string().optional(),
   OURA_REFRESH_TOKEN: z.string().optional(),
   OURA_SYNC_MINUTES: minutes(30),
 
-  // Garmin Connect — account login (unofficial API).
+  // Garmin Connect — optional; connecting from the dashboard is preferred (supports two-step codes).
   GARMIN_EMAIL: z.string().optional(),
   GARMIN_PASSWORD: z.string().optional(),
-  GARMIN_DOMAIN: z.enum(['garmin.com', 'garmin.cn']).default('garmin.com'),
   GARMIN_SYNC_MINUTES: minutes(15),
 
-  // MyFitnessPal — username plus browser session cookie (no public API exists).
+  // MyFitnessPal — optional; can also be set from the Connections panel.
   MFP_USERNAME: z.string().optional(),
   MFP_COOKIE: z.string().optional(),
   MFP_SYNC_MINUTES: minutes(10),
@@ -44,5 +46,7 @@ const EnvSchema = z.object({
 export type Config = z.infer<typeof EnvSchema>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  return EnvSchema.parse(env);
+  // Blank lines like `PUBLIC_URL=` in an env file mean "not set".
+  const cleaned = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ''));
+  return EnvSchema.parse(cleaned);
 }

@@ -1,14 +1,14 @@
-// garmin-connect is CommonJS: take the named export off the default import.
-import garminConnect from 'garmin-connect';
 import type { Config } from '../config.js';
 import { clockMinutes, dateRange } from '../lib/dates.js';
+import type { PythonBridge } from '../lib/python-bridge.js';
 import type { Store } from '../store.js';
 import type { Activity, GarminDay, SourceAdapter, SyncResult } from '../types.js';
 
 /**
- * Garmin Connect via the unofficial web API (Garmin's official Health API is
- * partner-only). The OAuth session is cached in the store so we log in rarely —
- * Garmin rate-limits and may challenge repeated SSO logins.
+ * Garmin Connect through python-garminconnect (Garmin's official Health API is
+ * partner-only, and since 2026 Garmin blocks plain server HTTP clients). You sign
+ * in once from the Connections panel; only the session tokens Garmin issues are
+ * stored, never your password. The library refreshes them as it goes.
  */
 
 export interface GarminSummary {
@@ -91,81 +91,72 @@ export function toActivity(a: GarminActivity): Activity {
   };
 }
 
-const { GarminConnect } = garminConnect;
-type GarminConnect = InstanceType<typeof GarminConnect>;
-type Tokens = ReturnType<GarminConnect['exportToken']>;
+const TOKENS = 'garmin.tokens';
+
+interface LoginResult {
+  status: 'ok' | 'needs_mfa';
+  tokens?: string;
+  displayName?: string;
+}
 
 export class GarminSource implements SourceAdapter {
   readonly id = 'garmin' as const;
   readonly label = 'Garmin';
-  private client: GarminConnect | undefined;
-  private displayName: string | undefined;
 
   constructor(
     private readonly config: Config,
     private readonly store: Store,
+    private readonly bridge: PythonBridge,
   ) {}
 
+  /** Connected once a sign-in has produced tokens (or env credentials allow a hands-off sign-in). */
   configured(): boolean {
-    return Boolean(this.config.GARMIN_EMAIL && this.config.GARMIN_PASSWORD);
+    return Boolean(this.store.getSecret<string>(TOKENS) || (this.config.GARMIN_EMAIL && this.config.GARMIN_PASSWORD));
   }
 
-  private get api() {
-    return `https://connectapi.${this.config.GARMIN_DOMAIN}`;
+  connected(): boolean {
+    return Boolean(this.store.getSecret<string>(TOKENS));
   }
 
-  private async connect(forceLogin = false): Promise<GarminConnect> {
-    if (this.client && !forceLogin) return this.client;
-    const gc = new GarminConnect(
-      { username: this.config.GARMIN_EMAIL ?? '', password: this.config.GARMIN_PASSWORD ?? '' },
-      this.config.GARMIN_DOMAIN,
-    );
-    const saved = this.store.getSecret<Tokens>('garmin.tokens');
-    if (saved && !forceLogin) {
-      gc.loadToken(saved.oauth1, saved.oauth2);
-    } else {
-      await gc.login();
-      await this.store.setSecret('garmin.tokens', gc.exportToken());
-    }
-    const profile = await gc.getUserProfile();
-    this.displayName = profile.displayName;
-    this.client = gc;
-    return gc;
+  /** Step 1 of signing in. May come back asking for the code Garmin sends. */
+  async login(email: string, password: string): Promise<'ok' | 'needs_mfa'> {
+    const res = await this.bridge.call<LoginResult>('garmin.login', { email, password });
+    if (res.status === 'ok' && res.tokens) await this.store.setSecret(TOKENS, res.tokens);
+    return res.status;
   }
 
-  private async withSession<T>(fn: (gc: GarminConnect) => Promise<T>): Promise<T> {
-    try {
-      return await fn(await this.connect());
-    } catch (err) {
-      // Expired/invalid cached session: log in once more and retry.
-      if (!isAuthError(err)) throw err;
-      this.client = undefined;
-      return fn(await this.connect(true));
-    }
+  /** Step 2, only when Garmin asked for a verification code. */
+  async verify(code: string): Promise<void> {
+    const res = await this.bridge.call<LoginResult>('garmin.mfa', { code });
+    if (!res.tokens) throw new Error('Garmin did not return a session');
+    await this.store.setSecret(TOKENS, res.tokens);
+  }
+
+  async disconnect(): Promise<void> {
+    await this.store.setSecret(TOKENS, undefined);
   }
 
   async sync(start: string, end: string): Promise<SyncResult> {
-    return this.withSession(async (gc) => {
-      const user = encodeURIComponent(this.displayName ?? '');
-      const days: SyncResult['days'] = [];
-      for (const date of dateRange(start, end)) {
-        const summary = await gc.get<GarminSummary>(
-          `${this.api}/usersummary-service/usersummary/daily/${user}?calendarDate=${date}`,
-        );
-        const sleep = await gc
-          .get<GarminSleep>(
-            `${this.api}/wellness-service/wellness/dailySleepData/${user}?date=${date}&nonSleepBufferMinutes=60`,
-          )
-          .catch(() => undefined);
-        days.push({ date, data: { ...toGarminDay(summary ?? {}, sleep) } });
+    if (!this.connected()) {
+      // Env credentials work only for accounts without two-step verification.
+      const status = await this.login(this.config.GARMIN_EMAIL ?? '', this.config.GARMIN_PASSWORD ?? '');
+      if (status === 'needs_mfa') throw new Error('Garmin wants a verification code. Connect Garmin from the Connections panel.');
+    }
+    const res = await this.bridge.call<{
+      days: Array<{ date: string; summary: GarminSummary | null; sleep: GarminSleep | null }>;
+      activities: GarminActivity[];
+      tokens: string;
+    }>('garmin.sync', { tokens: this.store.getSecret<string>(TOKENS), dates: dateRange(start, end) }, 300_000).catch(async (err: Error) => {
+      if (/auth|401|403|expired|token/i.test(err.message)) {
+        await this.disconnect();
+        throw new Error('Garmin session expired. Connect Garmin again from the Connections panel.');
       }
-      const recent = (await gc.getActivities(0, 30)) as unknown as GarminActivity[];
-      return { days, activities: recent.map(toActivity) };
+      throw err;
     });
+    if (res.tokens) await this.store.setSecret(TOKENS, res.tokens);
+    return {
+      days: res.days.map((d) => ({ date: d.date, data: { ...toGarminDay(d.summary ?? {}, d.sleep ?? undefined) } })),
+      activities: res.activities.filter((a) => a?.activityId && a.startTimeLocal).map(toActivity),
+    };
   }
-}
-
-function isAuthError(err: unknown): boolean {
-  const status = (err as { response?: { status?: number } })?.response?.status;
-  return status === 401 || status === 403;
 }

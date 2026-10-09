@@ -82,6 +82,24 @@ export class Store {
     return this.data.activities.filter((a) => a.start.slice(0, 10) >= start).slice(0, limit);
   }
 
+  /** Remove one source's data (days and its activities), e.g. when sample data gives way to real data. */
+  async clearSource(source: SourceId) {
+    for (const rec of Object.values(this.data.days)) delete (rec as unknown as Record<string, unknown>)[source];
+    this.data.activities = this.data.activities.filter((a) => a.source !== source);
+    delete this.data.secrets[`demo.${source}`];
+    await this.persist();
+  }
+
+  hasDemo(source: SourceId): boolean {
+    return this.data.secrets[`demo.${source}`] === true;
+  }
+
+  async markDemo(source: SourceId) {
+    if (this.hasDemo(source)) return;
+    this.data.secrets[`demo.${source}`] = true;
+    await this.persist();
+  }
+
   getGoals(): Goals {
     return { ...DEFAULT_GOALS, ...this.data.goals };
   }
