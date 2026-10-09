@@ -72,6 +72,7 @@ h1 { font-size: 22px; font-weight: 600; margin: 0; }
 h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .sub { margin: 4px 0 0; color: var(--text-secondary); display: flex; align-items: center; gap: 8px; }
 .muted { color: var(--text-muted); }
+.notice { color: var(--text-primary); }
 .small { font-size: 12px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 

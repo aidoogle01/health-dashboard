@@ -653,9 +653,18 @@ $('#mfp-file').addEventListener('change', async (e) => {
   if (!file) return;
   const res = await fetch('/api/import/mfp', { method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: await file.text() });
   const body = await res.json().catch(() => ({}));
-  alert(res.ok ? `Imported ${body.imported} days from MyFitnessPal.` : `Import failed: ${body.error ?? body.message ?? res.status}`);
+  notify(res.ok ? `Imported ${body.imported} days from MyFitnessPal` : `Import failed: ${body.error ?? body.message ?? res.status}`);
   e.target.value = '';
 });
+
+let noticeTimer;
+function notify(text) {
+  const n = $('#notice');
+  n.textContent = `· ${text}`;
+  n.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { n.hidden = true; }, 8000);
+}
 
 let resizeTimer;
 window.addEventListener('resize', () => {
