@@ -18,7 +18,7 @@ export function h(tag, props = {}, ...children) {
     if (v == null || v === false) continue;
     if (k === 'class') n.className = v;
     else if (k === 'text') n.textContent = v;
-    else if (k === 'style') Object.assign(n.style, v);
+    else if (k === 'style') for (const [sk, sv] of Object.entries(v)) sk.startsWith('--') ? n.style.setProperty(sk, sv) : (n.style[sk] = sv);
     else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
     else n.setAttribute(k, v === true ? '' : v);
   }
@@ -98,7 +98,7 @@ function axisLabel(svg, x, y, text, anchor = 'middle', baseline = 'auto') {
 }
 
 // ── Sparkline ────────────────────────────────────────────
-export function sparkline(vals, band) {
+export function sparkline(vals, band, color = 'var(--accent)') {
   const w = 140;
   const ht = 28;
   const pad = 3;
@@ -109,9 +109,9 @@ export function sparkline(vals, band) {
   const y = (v) => (max === min ? ht / 2 : ht - pad - ((v - min) / (max - min)) * (ht - pad * 2));
   const svg = el('svg', { class: 'spark', viewBox: `0 0 ${w} ${ht}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' });
   if (band) svg.append(el('rect', { x: 0, width: w, y: y(band.hi), height: Math.max(1, y(band.lo) - y(band.hi)), fill: 'var(--usual)' }));
-  svg.append(el('path', { d: linePath(vals, x, y), fill: 'none', stroke: 'var(--axis)', 'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+  svg.append(el('path', { d: linePath(vals, x, y), fill: 'none', stroke: color, opacity: 0.55, 'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
   const last = findLastIndex(vals, num);
-  svg.append(el('circle', { cx: x(last), cy: y(vals[last]), r: 2.5, fill: 'var(--accent)' }));
+  svg.append(el('circle', { cx: x(last), cy: y(vals[last]), r: 2.5, fill: color }));
   return svg;
 }
 
@@ -323,7 +323,7 @@ export function bullet(b) {
   const max = Math.max(b.target * 1.25, b.value ?? 0, b.band?.[1] ?? 0) || 1;
   const pct = (v) => `${Math.min(100, (v / max) * 100)}%`;
   const overBand = b.band && num(b.value) && b.value > b.band[1];
-  const track = h('div', { class: 'bullet-track' });
+  const track = h('div', { class: 'bullet-track', style: b.color ? { '--pillar': b.color } : {} });
   if (b.band) track.append(h('div', { class: 'bullet-band', style: { left: pct(b.band[0]), width: `calc(${pct(b.band[1])} - ${pct(b.band[0])})` } }));
   if (num(b.value)) track.append(h('div', { class: `bullet-fill${overBand ? ' over' : ''}`, style: { width: pct(b.value) } }));
   track.append(h('div', { class: 'bullet-target', style: { left: pct(b.target) }, title: `Goal ${b.fmt(b.target)}` }));
@@ -397,7 +397,7 @@ export function habitGrid(rows, days, fmtValue) {
     wrap.append(
       h(
         'div',
-        { class: 'heat-row' },
+        { class: 'heat-row', style: habit.pillar ? { '--pillar': habit.pillar } : {} },
         h(
           'div',
           { class: 'heat-head' },
@@ -452,7 +452,7 @@ export function sleepSchedule(holder, days, bed, wake, targetBed, fmtDur) {
   days.forEach((_, i) => {
     if (!num(beds[i]) || !num(wakes[i])) return;
     const late = beds[i] > targetBed;
-    svg.append(el('rect', { x: cx(i) - bw / 2, y: y(beds[i]), width: bw, height: Math.max(2, y(wakes[i]) - y(beds[i])), rx: Math.min(4, bw / 2), fill: late ? 'var(--series-2)' : 'var(--series-1)' }));
+    svg.append(el('rect', { x: cx(i) - bw / 2, y: y(beds[i]), width: bw, height: Math.max(2, y(wakes[i]) - y(beds[i])), rx: Math.min(4, bw / 2), fill: late ? 'var(--activity)' : 'var(--sleep)' }));
   });
 
   const ty = y(targetBed);
@@ -472,7 +472,7 @@ export function sleepSchedule(holder, days, bed, wake, targetBed, fmtDur) {
     const b = beds[i];
     const w = wakes[i];
     showTip(`Night before ${fmtDateLong(days[i].date)}`, [
-      { value: fmtClock(b), label: num(b) && b > targetBed ? `In bed, ${Math.round(b - targetBed)} min late` : 'In bed', color: num(b) && b > targetBed ? 'var(--series-2)' : 'var(--series-1)', key: 'rect' },
+      { value: fmtClock(b), label: num(b) && b > targetBed ? `In bed, ${Math.round(b - targetBed)} min late` : 'In bed', color: num(b) && b > targetBed ? 'var(--activity)' : 'var(--sleep)', key: 'rect' },
       { value: fmtClock(w), label: 'Woke' },
       { value: fmtDur(days[i]), label: 'Asleep' },
     ], clientX ?? rect.left + (cx(i) / W) * rect.width, rect.top + 8);
@@ -540,6 +540,40 @@ export function evidenceRows(results, outcome, { onTry, activeIds = new Set() } 
     list.append(h('div', { class: `diverge-row${r.enough ? '' : ' pending'}` }, label, track, value));
   }
   return list;
+}
+
+// ── Score ring: the at-a-glance headline (details stay linear) ──
+/** r: { label, value, max, display, sub, color, caption } */
+export function ring(r) {
+  const size = 112;
+  const stroke = 10;
+  const rad = (size - stroke) / 2;
+  const circ = 2 * Math.PI * rad;
+  const frac = num(r.value) ? Math.max(0, Math.min(1, r.value / r.max)) : 0;
+  const svg = el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, class: 'ring-svg', 'aria-hidden': 'true' });
+  svg.append(el('circle', { cx: size / 2, cy: size / 2, r: rad, fill: 'none', stroke: r.color, 'stroke-opacity': 0.16, 'stroke-width': stroke }));
+  const arc = el('circle', {
+    cx: size / 2,
+    cy: size / 2,
+    r: rad,
+    fill: 'none',
+    stroke: r.color,
+    'stroke-width': stroke,
+    'stroke-linecap': 'round',
+    'stroke-dasharray': `${circ} ${circ}`,
+    'stroke-dashoffset': circ * (1 - frac),
+    transform: `rotate(-90 ${size / 2} ${size / 2})`,
+    class: 'ring-arc',
+  });
+  arc.style.setProperty('--circ', String(circ));
+  svg.append(arc);
+  return h(
+    'div',
+    { class: 'ring', role: 'img', 'aria-label': `${r.label}: ${r.display}${r.sub ? `, ${r.sub}` : ''}`, style: { '--pillar': r.color } },
+    h('div', { class: 'ring-graphic' }, svg, h('div', { class: 'ring-center' }, h('span', { class: 'ring-value', text: r.display }), r.unit ? h('span', { class: 'ring-unit', text: r.unit }) : null)),
+    h('div', { class: 'ring-label' }, h('i', { class: 'pillar-dot' }), r.label),
+    r.sub ? h('div', { class: 'ring-sub', text: r.sub }) : null,
+  );
 }
 
 export { fmtInt, fmtHoursShort };

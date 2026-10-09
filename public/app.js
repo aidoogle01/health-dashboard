@@ -32,6 +32,7 @@ import {
 import {
   LEVEL_LABEL,
   bullet,
+  ring,
   evidenceRows,
   findLastIndex,
   fmtDateLong,
@@ -220,7 +221,7 @@ function renderToday(days, goals, experiments) {
     gap >= 2 && Number.isFinite(gap)
       ? h('div', { class: 'focus-main' }, h('h3', { text: 'Welcome back' }), h('p', { text: `There's no data from the last ${gap} days, which is completely normal. Wear your ring tonight and log a meal or two, and your trends will pick up where they left off.` }))
       : main
-        ? h('div', { class: `focus-main level-${main.level}` }, h('div', { class: 'focus-title' }, statusIcon(main.level), h('h3', { text: main.title })), h('p', { text: main.detail }), h('span', { class: 'visually-hidden', text: LEVEL_LABEL[main.level] }))
+        ? h('div', { class: `focus-main level-${main.level}`, style: main.pillar ? { '--pillar': main.pillar } : {} }, h('div', { class: 'focus-title' }, statusIcon(main.level), h('h3', { text: main.title })), h('p', { text: main.detail }), h('span', { class: 'visually-hidden', text: LEVEL_LABEL[main.level] }))
         : h('div', { class: 'focus-main' }, h('h3', { text: 'Nothing needs attention today' }), h('p', { text: 'Your recovery is within your usual range and your goals are on pace. Keep doing what you are doing.' })),
     rest.length
       ? h('div', {}, h('h4', { class: 'mini-title', text: 'Also today' }), h('ul', { class: 'focus-list' }, ...rest.map((it) => h('li', {}, statusIcon(it.level), h('div', {}, h('strong', { text: it.title }), h('p', { text: it.detail }))))))
@@ -252,7 +253,7 @@ function renderToday(days, goals, experiments) {
     ? { level: 'info', text: 'Nothing logged yet today' }
     : eaten > calGoal * (1 + tol)
       ? { level: 'warning', text: `Above your range today · ${weekLine('calories', 'In range')}` }
-      : { level: 'good', text: `${isLive ? `${fmtInt(Math.max(0, calGoal - eaten))} kcal left` : 'In range'} · ${weekLine('calories', 'In range')}` };
+      : { level: 'good', text: `${isLive && eaten < calGoal ? `${fmtInt(calGoal - eaten)} kcal left` : 'In your range'} · ${weekLine('calories', 'In range')}` };
 
   const dow = (new Date(`${today.date}T12:00:00`).getDay() + 6) % 7;
   const week = days.slice(-(dow + 1));
@@ -268,11 +269,12 @@ function renderToday(days, goals, experiments) {
     h(
       'div',
       { class: 'bullets' },
-      bullet({ label: 'Steps', value: steps, target: goals.steps, fmt: fmtInt, pace: isLive && p < 1 ? goals.steps * p : undefined, status: paceStatus(steps, goals.steps, 'steps', 'steps') }),
-      bullet({ label: 'Protein', value: protein, target: goals.protein, unit: 'g', fmt: fmtInt, pace: isLive && p < 1 ? goals.protein * p : undefined, status: paceStatus(protein, goals.protein, 'g', 'protein') }),
-      bullet({ label: 'Fibre', value: fiber, target: goals.fiber, unit: 'g', fmt: fmtInt, pace: isLive && p < 1 ? goals.fiber * p : undefined, status: paceStatus(fiber, goals.fiber, 'g', 'fiber') }),
-      goals.showCalories ? bullet({ label: 'Calories', value: eaten, target: calGoal, unit: 'kcal', fmt: fmtInt, band: [calGoal * (1 - tol), calGoal * (1 + tol)], status: calStatus }) : null,
+      bullet({ color: 'var(--activity)', label: 'Steps', value: steps, target: goals.steps, fmt: fmtInt, pace: isLive && p < 1 ? goals.steps * p : undefined, status: paceStatus(steps, goals.steps, 'steps', 'steps') }),
+      bullet({ color: 'var(--nutrition)', label: 'Protein', value: protein, target: goals.protein, unit: 'g', fmt: fmtInt, pace: isLive && p < 1 ? goals.protein * p : undefined, status: paceStatus(protein, goals.protein, 'g', 'protein') }),
+      bullet({ color: 'var(--nutrition)', label: 'Fibre', value: fiber, target: goals.fiber, unit: 'g', fmt: fmtInt, pace: isLive && p < 1 ? goals.fiber * p : undefined, status: paceStatus(fiber, goals.fiber, 'g', 'fiber') }),
+      goals.showCalories ? bullet({ color: 'var(--nutrition)', label: 'Calories', value: eaten, target: calGoal, unit: 'kcal', fmt: fmtInt, band: [calGoal * (1 - tol), calGoal * (1 + tol)], status: calStatus }) : null,
       bullet({
+        color: 'var(--activity)',
         label: 'Intensity minutes this week',
         value: hasIntensity ? weekIntensity : undefined,
         target: goals.intensityWeekly,
@@ -288,6 +290,7 @@ function renderToday(days, goals, experiments) {
               : { level: 'info', text: `${fmtInt(weekPace - weekIntensity)} min behind pace for the week` },
       }),
       bullet({
+        color: 'var(--sleep)',
         label: 'Sleep last night',
         value: sleep,
         target: goals.sleepMin,
@@ -307,17 +310,17 @@ function renderToday(days, goals, experiments) {
 
   // Recovery signals: each against your own usual range, in one shared vocabulary.
   const TILES = [
-    { label: 'Readiness', get: M.readiness, up: true, score: true },
-    { label: 'Sleep score', get: M.sleepScore, up: true, score: true },
-    { label: 'HRV', get: M.hrv, unit: 'ms', up: true },
-    { label: 'Resting HR', get: M.restingHr, unit: 'bpm', up: false },
-    { label: 'Body Battery', get: M.bodyBattery, up: true, score: true },
+    { label: 'Readiness', get: M.readiness, up: true, score: true, pillar: 'var(--recovery)' },
+    { label: 'Sleep score', get: M.sleepScore, up: true, score: true, pillar: 'var(--sleep)' },
+    { label: 'HRV', get: M.hrv, unit: 'ms', up: true, pillar: 'var(--recovery)' },
+    { label: 'Resting HR', get: M.restingHr, unit: 'bpm', up: false, pillar: 'var(--recovery)' },
+    { label: 'Body Battery', get: M.bodyBattery, up: true, score: true, pillar: 'var(--activity)' },
   ];
   const tiles = h('div', { class: 'tiles' });
   for (const t of TILES) {
     const values = days.map(t.get);
     const idx = findLastIndex(values, num);
-    const tile = h('div', { class: 'tile' }, h('div', { class: 'label', text: t.label }));
+    const tile = h('div', { class: 'tile', style: { '--pillar': t.pillar } }, h('div', { class: 'label' }, h('i', { class: 'pillar-dot' }), t.label));
     if (idx < 0) {
       tile.append(h('div', { class: 'value', text: '–' }), h('div', { class: 'meta', text: 'No data yet' }));
       tiles.append(tile);
@@ -332,11 +335,39 @@ function renderToday(days, goals, experiments) {
       h('div', { class: 'meta' }, h('span', { text: days[idx].date === todayIso ? 'Today' : fmtDateShort(days[idx].date) }), range ? h('span', { text: `Usual ${fmtInt(range.lo)}–${fmtInt(range.hi)}` }) : null),
     );
     const spark = values.slice(-14);
-    if (spark.filter(num).length >= 2) tile.append(sparkline(spark, range));
+    if (spark.filter(num).length >= 2) tile.append(sparkline(spark, range, t.pillar));
     tiles.append(tile);
   }
 
+  // Headline rings, Oura-style: one glance per pillar. Everything below stays linear.
+  const lastOf = (get) => {
+    const i = findLastIndex(days, (d) => num(get(d)));
+    return i < 0 ? undefined : { v: get(days[i]), i };
+  };
+  const readyNow = lastOf(M.readiness);
+  const sleepNow = lastOf(M.sleepScore);
+  const ringSub = (get, at, up) => {
+    if (!at) return 'No data yet';
+    const vals = days.map(get);
+    const band = scoreBand(at.v);
+    const usual = usualLabel(at.v, usualRange(vals, at.i), up).text;
+    return band ? `${band} · ${usual.toLowerCase()}` : usual;
+  };
+  const rings = h(
+    'section',
+    { class: 'card rings-card' },
+    h(
+      'div',
+      { class: 'rings' },
+      ring({ label: 'Readiness', value: readyNow?.v, max: 100, display: fmtInt(readyNow?.v), color: 'var(--recovery)', sub: ringSub(M.readiness, readyNow, true) }),
+      ring({ label: 'Sleep', value: sleepNow?.v, max: 100, display: fmtInt(sleepNow?.v), color: 'var(--sleep)', sub: num(M.sleepMin(today)) ? `${fmtHoursShort(M.sleepMin(today))} · ${(scoreBand(sleepNow?.v) ?? '').toLowerCase()}` : ringSub(M.sleepScore, sleepNow, true) }),
+      ring({ label: 'Activity', value: steps, max: goals.steps, display: num(steps) ? compact(steps) : '–', unit: 'steps', color: 'var(--activity)', sub: num(steps) ? `${Math.round((steps / goals.steps) * 100)}% of ${compact(goals.steps)}${isLive && p < 1 ? ' so far' : ''}` : 'No data yet' }),
+      ring({ label: 'Nutrition', value: protein, max: goals.protein, display: num(protein) ? `${fmtInt(protein)}` : '–', unit: 'g protein', color: 'var(--nutrition)', sub: num(protein) ? `${Math.round((protein / goals.protein) * 100)}% of ${goals.protein} g goal` : 'Nothing logged yet' }),
+    ),
+  );
+
   $('#panel-today').replaceChildren(
+    rings,
     h('div', { class: 'grid-2' }, focus, progress),
     h('div', { class: 'section-head' }, h('h3', { class: 'section-title', text: 'Recovery signals' }), h('span', { class: 'muted small', text: 'Compared with your usual range: the middle 80% of your last 30 days' })),
     tiles,
@@ -389,11 +420,11 @@ function renderHabits(days, goals) {
       : h('div', { class: 'empty-chart', text: 'No bedtimes recorded yet. Connect Oura or Garmin.' });
   const schedule = h(
     'section',
-    { class: 'card' },
+    { class: 'card has-pillar', style: { '--pillar': 'var(--sleep)' } },
     cardHead('Sleep schedule', 'Each bar runs from bedtime to wake. A regular schedule is one of the simplest ways to sleep better.', 'schedule'),
     stats,
     beds.length
-      ? h('div', { class: 'legend' }, legendItem('In bed by target', 'var(--series-1)', 'rect'), legendItem('Later than target', 'var(--series-2)', 'rect'), legendItem('Target window: the 30 minutes before your bedtime', null, 'band'))
+      ? h('div', { class: 'legend' }, legendItem('In bed by target', 'var(--sleep)', 'rect'), legendItem('Later than target', 'var(--activity)', 'rect'), legendItem('Target window: the 30 minutes before your bedtime', null, 'band'))
       : null,
     schedBody,
   );
@@ -484,7 +515,7 @@ function renderInsights(all, goals, experiments) {
 
   const drivers = h(
     'section',
-    { class: 'card span-2' },
+    { class: 'card span-2 has-pillar', style: { '--pillar': 'var(--recovery)' } },
     cardHead('What goes with better recovery', `Next-morning ${outcome.label.toLowerCase()} after days with each habit, compared with days without it · last ${INSIGHT_DAYS} days`, null, seg),
     strongest
       ? h(
@@ -553,19 +584,19 @@ function renderInsights(all, goals, experiments) {
       fmt: (v) => `${fmtInt(v)} kcal`,
       endFmt: compact,
       height: 150,
-      series: [{ label: 'Calories', color: 'var(--series-1)', values: nd.map(M.eaten) }],
+      series: [{ label: 'Calories', color: 'var(--nutrition)', values: nd.map(M.eaten) }],
       rolling: rolling(nd.map(M.eaten)),
       band: { lo: nd.map((d) => M.calorieGoal(d, goals) * (1 - tol)), hi: nd.map((d) => M.calorieGoal(d, goals) * (1 + tol)) },
       bandLabel: 'Your calorie range',
     },
-    { id: 'n-protein', title: 'Protein', type: 'line', fmt: (v) => `${fmtInt(v)} g`, height: 150, series: [{ label: 'Protein', color: 'var(--series-1)', values: nd.map(M.protein) }], rolling: rolling(nd.map(M.protein)), goal: { value: goals.protein, label: `Goal ${goals.protein} g` } },
-    { id: 'n-fiber', title: 'Fibre', type: 'line', fmt: (v) => `${fmtInt(v)} g`, height: 150, series: [{ label: 'Fibre', color: 'var(--series-1)', values: nd.map(M.fiber) }], rolling: rolling(nd.map(M.fiber)), goal: { value: goals.fiber, label: `Goal ${goals.fiber} g` } },
+    { id: 'n-protein', title: 'Protein', type: 'line', fmt: (v) => `${fmtInt(v)} g`, height: 150, series: [{ label: 'Protein', color: 'var(--nutrition)', values: nd.map(M.protein) }], rolling: rolling(nd.map(M.protein)), goal: { value: goals.protein, label: `Goal ${goals.protein} g` } },
+    { id: 'n-fiber', title: 'Fibre', type: 'line', fmt: (v) => `${fmtInt(v)} g`, height: 150, series: [{ label: 'Fibre', color: 'var(--nutrition)', values: nd.map(M.fiber) }], rolling: rolling(nd.map(M.fiber)), goal: { value: goals.fiber, label: `Goal ${goals.fiber} g` } },
   ].filter(Boolean);
   const nutrition = h(
     'section',
-    { class: 'card' },
+    { class: 'card has-pillar', style: { '--pillar': 'var(--nutrition)' } },
     cardHead('Nutrition, 7-day averages', 'Dots are days; the line smooths out the day-to-day swings · last 30 days'),
-    h('div', { class: 'legend' }, legendItem('Daily', 'var(--series-1)', 'rect'), legendItem('7-day average', 'var(--series-1)'), goals.showCalories ? legendItem('Calorie range', null, 'band') : null),
+    h('div', { class: 'legend' }, legendItem('Daily', 'var(--nutrition)', 'rect'), legendItem('7-day average', 'var(--nutrition)'), goals.showCalories ? legendItem('Calorie range', null, 'band') : null),
     ...nutritionCharts.map((c) =>
       h('div', { class: 'multiple' }, h('div', { class: 'multiple-title' }, h('strong', { text: c.title }), h('span', { class: 'muted small', text: num(c.rolling.at(-1)) ? `7-day avg ${c.fmt(c.rolling.at(-1))}` : '' })), deferDraw(h('div', { class: 'chart' }), (el) => timeChart(el, c, dates))),
     ),
@@ -588,41 +619,44 @@ function renderTrends(days, goals, activities) {
     return { lo: b.lo.slice(offset), hi: b.hi.slice(offset) };
   };
   const CHARTS = [
-    { id: 'scores', title: 'Sleep & readiness', note: 'Oura · score 0–100', type: 'line', fmt: fmtInt, series: [series('Sleep score', M.sleepScore, 'var(--series-1)'), series('Readiness', M.readiness, 'var(--series-2)')] },
+    { id: 'scores', pillar: 'var(--sleep)', title: 'Sleep & readiness', note: 'Oura · score 0–100', type: 'line', fmt: fmtInt, series: [series('Sleep score', M.sleepScore, 'var(--sleep)'), series('Readiness', M.readiness, 'var(--recovery)')] },
     goals.showCalories && {
       id: 'energy',
+      pillar: 'var(--nutrition)',
       title: 'Calories eaten vs burned',
       note: 'kcal · MyFitnessPal vs Garmin',
       type: 'line',
       zero: true,
       fmt: fmtInt,
-      series: [series('Eaten', M.eaten, 'var(--series-1)'), series('Burned', M.burned, 'var(--series-2)')],
+      series: [series('Eaten', M.eaten, 'var(--nutrition)'), series('Burned', M.burned, 'var(--activity)')],
       goal: num(calGoal) ? { value: calGoal, label: `Goal ${fmtInt(calGoal)}` } : undefined,
     },
-    { id: 'macros', title: 'Macros', note: 'grams · MyFitnessPal', type: 'stack', fmt: (v) => `${fmtInt(v)} g`, series: [series('Protein', M.protein, 'var(--series-1)'), series('Carbs', M.carbs, 'var(--series-2)'), series('Fat', M.fat, 'var(--series-3)')] },
+    { id: 'macros', pillar: 'var(--nutrition)', title: 'Macros', note: 'grams · MyFitnessPal', type: 'stack', fmt: (v) => `${fmtInt(v)} g`, series: [series('Protein', M.protein, 'var(--nutrition)'), series('Carbs', M.carbs, 'var(--activity)'), series('Fat', M.fat, 'var(--recovery)')] },
     {
       id: 'steps',
+      pillar: 'var(--activity)',
       title: 'Steps',
       note: 'Bars are days; the line is your 7-day average',
       type: 'bar',
       fmt: fmtInt,
-      series: [series('Steps', M.steps, 'var(--series-1)')],
+      series: [series('Steps', M.steps, 'var(--activity)')],
       rolling: rolling(days.map(M.steps)),
       goal: { value: goals.steps, label: `Goal ${compact(goals.steps)}` },
     },
     {
       id: 'sleep',
+      pillar: 'var(--sleep)',
       title: 'Sleep stages',
       note: 'hours · Oura',
       type: 'stack',
       fmt: fmtHoursShort,
       axisFmt: (m) => `${Math.round(m / 60)}h`,
       tickStep: 120,
-      series: [series('Deep', M.deep, 'var(--series-1)'), series('REM', M.rem, 'var(--series-2)'), series('Light', M.light, 'var(--series-3)')],
+      series: [series('Deep', M.deep, 'var(--sleep-deep)'), series('REM', M.rem, 'var(--sleep)'), series('Light', M.light, 'var(--sleep-light)')],
       goal: { value: goals.sleepMin, label: `Goal ${fmtHoursShort(goals.sleepMin)}`, fmt: fmtHoursShort },
     },
-    { id: 'rhr', title: 'Resting heart rate', note: 'bpm · lower is usually better', type: 'line', fmt: (v) => `${fmtInt(v)} bpm`, series: [series('Resting HR', M.restingHr, 'var(--series-1)')], rolling: rolling(days.map(M.restingHr)), band: bandFor(M.restingHr) },
-    { id: 'hrv', title: 'Heart rate variability', note: 'ms · higher is usually better', type: 'line', fmt: (v) => `${fmtInt(v)} ms`, series: [series('HRV', M.hrv, 'var(--series-1)')], rolling: rolling(days.map(M.hrv)), band: bandFor(M.hrv) },
+    { id: 'rhr', pillar: 'var(--recovery)', title: 'Resting heart rate', note: 'bpm · lower is usually better', type: 'line', fmt: (v) => `${fmtInt(v)} bpm`, series: [series('Resting HR', M.restingHr, 'var(--recovery)')], rolling: rolling(days.map(M.restingHr)), band: bandFor(M.restingHr) },
+    { id: 'hrv', pillar: 'var(--recovery)', title: 'Heart rate variability', note: 'ms · higher is usually better', type: 'line', fmt: (v) => `${fmtInt(v)} ms`, series: [series('HRV', M.hrv, 'var(--recovery)')], rolling: rolling(days.map(M.hrv)), band: bandFor(M.hrv) },
   ].filter(Boolean);
 
   const grid = h('div', { class: 'grid' });
@@ -646,7 +680,7 @@ function renderTrends(days, goals, activities) {
             [...days.keys()].reverse().map((i) => [fmtDateLong(dates[i]), ...c.series.map((s) => (num(s.values[i]) ? c.fmt(s.values[i]) : '–')), ...(c.rolling ? [num(c.rolling[i]) ? c.fmt(c.rolling[i]) : '–'] : [])]),
           )
         : deferDraw(h('div', { class: 'chart' }), (el) => timeChart(el, c, dates));
-    grid.append(h('section', { class: 'card' }, cardHead(c.title, c.note, c.id), hasData ? legend : null, body));
+    grid.append(h('section', { class: 'card has-pillar', style: { '--pillar': c.pillar } }, cardHead(c.title, c.note, c.id), hasData ? legend : null, body));
   }
 
   // Activities, each linked to how you recovered the next morning.

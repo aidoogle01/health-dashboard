@@ -134,6 +134,7 @@ export function habits(goals) {
   const list = [
     {
       id: 'sleep',
+      pillar: 'var(--sleep)',
       label: 'Sleep',
       target: `${fmtHoursShort(goals.sleepMin)}+`,
       value: M.sleepMin,
@@ -141,6 +142,7 @@ export function habits(goals) {
     },
     {
       id: 'bedtime',
+      pillar: 'var(--sleep)',
       label: 'Bedtime',
       target: `by ${fmtClock(goals.bedtimeMin)}`,
       value: M.bedtime,
@@ -153,6 +155,7 @@ export function habits(goals) {
     },
     {
       id: 'steps',
+      pillar: 'var(--activity)',
       label: 'Steps',
       target: `${compact(goals.steps)}+`,
       intraday: true,
@@ -161,6 +164,7 @@ export function habits(goals) {
     },
     {
       id: 'protein',
+      pillar: 'var(--nutrition)',
       label: 'Protein',
       target: `${goals.protein} g+`,
       intraday: true,
@@ -169,6 +173,7 @@ export function habits(goals) {
     },
     {
       id: 'fiber',
+      pillar: 'var(--nutrition)',
       label: 'Fibre',
       target: `${goals.fiber} g+`,
       intraday: true,
@@ -179,6 +184,7 @@ export function habits(goals) {
   if (goals.showCalories) {
     list.push({
       id: 'calories',
+      pillar: 'var(--nutrition)',
       label: 'Calories in range',
       target: `±${goals.calorieTolerancePct}% of goal`,
       intraday: true,
@@ -505,6 +511,7 @@ export function focusItems(days, goals, now = new Date()) {
     const signals = strained.length >= 2 ? ` ${strained.map((s) => s.label).join(' and ')} are both outside your usual range.` : '';
     items.push({
       level: strained.length >= 2 ? 'warning' : 'info',
+      pillar: 'var(--recovery)',
       title: 'Take it easier today',
       detail:
         `Readiness is ${fmtInt(ready)}, below your usual ${fmtInt(readyRange.lo)}–${fmtInt(readyRange.hi)}.${signals} ` +
@@ -513,7 +520,7 @@ export function focusItems(days, goals, now = new Date()) {
         (num(week) ? `Your 7-day average is ${fmtInt(week)}, so one lower day is normal.` : ''),
     });
   } else if (num(ready) && readyRange && ready > readyRange.hi) {
-    items.push({ level: 'good', title: 'Good day for a hard session', detail: `Readiness is ${fmtInt(ready)}, above your usual ${fmtInt(readyRange.lo)}–${fmtInt(readyRange.hi)}.` });
+    items.push({ level: 'good', pillar: 'var(--recovery)', title: 'Good day for a hard session', detail: `Readiness is ${fmtInt(ready)}, above your usual ${fmtInt(readyRange.lo)}–${fmtInt(readyRange.hi)}.` });
   }
 
   const steps = M.steps(today);
@@ -522,6 +529,7 @@ export function focusItems(days, goals, now = new Date()) {
     if (gap > 800) {
       items.push({
         level: 'info',
+        pillar: 'var(--activity)',
         title: `A ${Math.max(5, Math.round(gap / 110 / 5) * 5)}-minute walk keeps steps on pace`,
         detail: `You're at ${fmtInt(steps)}; on pace for ${compact(goals.steps)} would be about ${fmtInt(goals.steps * p)} by now.`,
       });
@@ -535,6 +543,7 @@ export function focusItems(days, goals, now = new Date()) {
       const calLeft = goals.showCalories && num(M.eaten(today)) && num(M.calorieGoal(today, goals)) ? M.calorieGoal(today, goals) - M.eaten(today) : undefined;
       items.push({
         level: 'info',
+        pillar: 'var(--nutrition)',
         title: `${fmtInt(left)} g protein to go`,
         detail:
           num(calLeft) && calLeft > 0 && (left * 4) / calLeft > 0.45
@@ -550,6 +559,7 @@ export function focusItems(days, goals, now = new Date()) {
     if (late > 20) {
       items.push({
         level: 'info',
+        pillar: 'var(--sleep)',
         title: `Start winding down by ${fmtClock(goals.bedtimeMin - 30)}`,
         detail: `You've averaged ${fmtClock(mean(beds))} in bed this week, ${late} min after your ${fmtClock(goals.bedtimeMin)} target.`,
       });
