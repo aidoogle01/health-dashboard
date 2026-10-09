@@ -1,12 +1,13 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { Activity, DayRecord, SourceId } from './types.js';
+import { DEFAULT_GOALS, type Activity, type DayRecord, type Goals, type SourceId } from './types.js';
 
 interface StoreData {
   days: Record<string, DayRecord>;
   activities: Activity[];
   /** Rotating credentials (Oura refresh token, Garmin session) so restarts don't re-login. */
   secrets: Record<string, unknown>;
+  goals?: Partial<Goals>;
 }
 
 const MAX_ACTIVITIES = 200;
@@ -29,6 +30,7 @@ export class Store {
         days: raw.days ?? {},
         activities: raw.activities ?? [],
         secrets: raw.secrets ?? {},
+        ...(raw.goals ? { goals: raw.goals } : {}),
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -76,6 +78,15 @@ export class Store {
 
   getActivities(start: string, limit = 25): Activity[] {
     return this.data.activities.filter((a) => a.start.slice(0, 10) >= start).slice(0, limit);
+  }
+
+  getGoals(): Goals {
+    return { ...DEFAULT_GOALS, ...this.data.goals };
+  }
+
+  async setGoals(goals: Goals) {
+    this.data.goals = goals;
+    await this.persist();
   }
 
   getSecret<T>(key: string): T | undefined {

@@ -15,16 +15,8 @@
           <p class="sub"><span class="live-dot" aria-hidden="true"></span><span id="live-text">Connecting…</span><span id="notice" class="notice" role="status" hidden></span></p>
         </div>
         <div class="controls" role="group" aria-label="Dashboard controls">
-          <label class="select">
-            <span class="visually-hidden">Date range</span>
-            <select id="range">
-              <option value="7">Last 7 days</option>
-              <option value="14">Last 14 days</option>
-              <option value="30" selected>Last 30 days</option>
-              <option value="90">Last 90 days</option>
-            </select>
-          </label>
           <button id="sync" type="button" class="btn">Sync now</button>
+          <button id="goals-toggle" type="button" class="btn btn-ghost" aria-expanded="false" aria-controls="goals-panel">Goals</button>
           <label class="btn btn-ghost" title="Import a MyFitnessPal nutrition CSV export">
             Import MFP CSV
             <input id="mfp-file" type="file" accept=".csv,text/csv" hidden />
@@ -32,27 +24,56 @@
         </div>
       </header>
 
+      <section id="goals-panel" class="card goals-panel" hidden aria-label="Your goals">
+        <form id="goals-form">
+          <div class="card-head">
+            <div>
+              <h2>Your goals</h2>
+              <div class="muted small">Every view measures you against these.</div>
+            </div>
+          </div>
+          <div class="goals-fields">
+            <label>Sleep (hours)<input id="g-sleep" name="sleepHours" type="number" min="3" max="12" step="0.25" required /></label>
+            <label>Bedtime<input id="g-bedtime" name="bedtime" type="time" required /></label>
+            <label>Steps<input id="g-steps" name="steps" type="number" min="500" max="50000" step="500" required /></label>
+            <label>Protein (g)<input id="g-protein" name="protein" type="number" min="10" max="400" step="5" required /></label>
+            <label>Calories (kcal)<input id="g-calories" name="calories" type="number" min="800" max="6000" step="50" required /><span class="hint">Your MyFitnessPal goal is used for any day that has one</span></label>
+            <label>Calorie range (±%)<input id="g-tol" name="tol" type="number" min="2" max="30" step="1" required /></label>
+            <label>Intensity minutes / week<input id="g-intensity" name="intensity" type="number" min="0" max="1500" step="10" required /></label>
+          </div>
+          <div class="goals-actions">
+            <button type="submit" class="btn btn-primary">Save goals</button>
+            <button type="button" id="goals-cancel" class="btn btn-ghost">Cancel</button>
+          </div>
+        </form>
+      </section>
+
       <section id="sources" class="sources" aria-label="Data sources"></section>
 
+      <div class="toolbar">
+        <nav class="tabs" role="tablist" aria-label="Views">
+          <button role="tab" id="tab-today" aria-controls="panel-today" type="button">Today</button>
+          <button role="tab" id="tab-habits" aria-controls="panel-habits" type="button">Habits</button>
+          <button role="tab" id="tab-insights" aria-controls="panel-insights" type="button">Insights</button>
+          <button role="tab" id="tab-trends" aria-controls="panel-trends" type="button">Trends</button>
+        </nav>
+        <label class="select" id="range-wrap">
+          <span class="visually-hidden">Date range</span>
+          <select id="range">
+            <option value="14">Last 14 days</option>
+            <option value="30" selected>Last 30 days</option>
+            <option value="60">Last 60 days</option>
+            <option value="90">Last 90 days</option>
+          </select>
+        </label>
+        <span id="scope-note" class="muted small"></span>
+      </div>
+
       <main id="main">
-        <section id="tiles" class="tiles" aria-label="Today"></section>
-
-        <section class="grid" id="charts"></section>
-
-        <section class="card">
-          <div class="card-head">
-            <h2>Recent activities</h2>
-            <span class="muted small">Garmin</span>
-          </div>
-          <div class="table-wrap">
-            <table class="data" id="activities">
-              <thead>
-                <tr><th>Date</th><th>Activity</th><th class="num">Duration</th><th class="num">Distance</th><th class="num">Calories</th><th class="num">Avg HR</th></tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </section>
+        <section id="panel-today" role="tabpanel" aria-labelledby="tab-today"></section>
+        <section id="panel-habits" role="tabpanel" aria-labelledby="tab-habits" hidden></section>
+        <section id="panel-insights" role="tabpanel" aria-labelledby="tab-insights" hidden></section>
+        <section id="panel-trends" role="tabpanel" aria-labelledby="tab-trends" hidden></section>
       </main>
     </div>
     <div id="tooltip" class="tooltip" role="status" aria-live="polite" hidden></div>

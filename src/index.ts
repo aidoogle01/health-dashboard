@@ -69,7 +69,7 @@ server.addContentTypeParser(['text/csv', 'text/plain'], { parseAs: 'string', bod
 // ── API ─────────────────────────────────────────────────
 server.get('/health', async () => ({ status: 'ok' }));
 
-const RangeQuery = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) });
+const RangeQuery = z.object({ days: z.coerce.number().int().min(1).max(365).default(90) });
 
 server.get('/api/dashboard', async (request) => {
   const { days } = RangeQuery.parse(request.query);
@@ -81,7 +81,28 @@ server.get('/api/dashboard', async (request) => {
     days: store.getDays(start, end),
     activities: store.getActivities(start),
     sources: scheduler.statuses(),
+    goals: store.getGoals(),
   };
+});
+
+const GoalsBody = z.object({
+  sleepMin: z.number().int().min(180).max(720),
+  bedtimeMin: z.number().int().min(-360).max(240),
+  steps: z.number().int().min(500).max(50000),
+  protein: z.number().int().min(10).max(400),
+  calories: z.number().int().min(800).max(6000),
+  calorieTolerancePct: z.number().min(2).max(30),
+  intensityWeekly: z.number().int().min(0).max(1500),
+});
+
+server.get('/api/goals', async () => store.getGoals());
+
+server.put('/api/goals', async (request, reply) => {
+  const parsed = GoalsBody.safeParse(request.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.errors[0]?.message ?? 'Invalid goals' });
+  await store.setGoals(parsed.data);
+  scheduler.emit('update', { source: 'goals' });
+  return parsed.data;
 });
 
 const SyncBody = z.object({ source: z.enum(['oura', 'garmin', 'mfp']).optional() }).default({});

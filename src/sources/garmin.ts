@@ -1,7 +1,7 @@
 // garmin-connect is CommonJS: take the named export off the default import.
 import garminConnect from 'garmin-connect';
 import type { Config } from '../config.js';
-import { dateRange } from '../lib/dates.js';
+import { clockMinutes, dateRange } from '../lib/dates.js';
 import type { Store } from '../store.js';
 import type { Activity, GarminDay, SourceAdapter, SyncResult } from '../types.js';
 
@@ -27,6 +27,9 @@ export interface GarminSummary {
 export interface GarminSleep {
   dailySleepDTO?: {
     sleepTimeSeconds?: number | null;
+    /** Epoch ms of the wearer's local wall-clock time (Garmin encodes local time as if UTC). */
+    sleepStartTimestampLocal?: number | null;
+    sleepEndTimestampLocal?: number | null;
     sleepScores?: { overall?: { value?: number | null } };
   };
 }
@@ -43,6 +46,12 @@ export interface GarminActivity {
 }
 
 const num = (v: number | null | undefined) => (typeof v === 'number' && v >= 0 ? v : undefined);
+
+function localClock(ts: number | null | undefined, isBedtime: boolean): number | undefined {
+  if (typeof ts !== 'number') return undefined;
+  const d = new Date(ts);
+  return clockMinutes(d.getUTCHours(), d.getUTCMinutes(), isBedtime);
+}
 
 /** Exported for tests. */
 export function toGarminDay(summary: GarminSummary, sleep: GarminSleep | undefined): GarminDay {
@@ -63,6 +72,8 @@ export function toGarminDay(summary: GarminSummary, sleep: GarminSleep | undefin
     distanceM: num(summary.totalDistanceMeters),
     sleepMin: sleepS === undefined ? undefined : Math.round(sleepS / 60),
     sleepScore: num(sleep?.dailySleepDTO?.sleepScores?.overall?.value),
+    bedtimeMin: localClock(sleep?.dailySleepDTO?.sleepStartTimestampLocal, true),
+    wakeMin: localClock(sleep?.dailySleepDTO?.sleepEndTimestampLocal, false),
   };
 }
 

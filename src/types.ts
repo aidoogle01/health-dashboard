@@ -16,6 +16,9 @@ export interface OuraDay {
   steps?: N;
   activeCalories?: N;
   temperatureDeviation?: N;
+  /** Clock times of the main sleep, minutes from midnight of the wake day (23:30 → -30). */
+  bedtimeMin?: N;
+  wakeMin?: N;
 }
 
 export interface GarminDay {
@@ -30,6 +33,8 @@ export interface GarminDay {
   distanceM?: N;
   sleepMin?: N;
   sleepScore?: N;
+  bedtimeMin?: N;
+  wakeMin?: N;
 }
 
 export interface MfpDay {
@@ -87,3 +92,27 @@ export interface SourceAdapter {
   /** Fetch data for an inclusive date range (YYYY-MM-DD). */
   sync(start: string, end: string): Promise<SyncResult>;
 }
+
+/** Targets the dashboard measures you against. Editable from the UI. */
+export interface Goals {
+  sleepMin: number;
+  /** Target bedtime, minutes from midnight (23:00 → -60). */
+  bedtimeMin: number;
+  steps: number;
+  protein: number;
+  /** Used when MyFitnessPal has no daily calorie goal for the day. */
+  calories: number;
+  /** A day counts as on target when calories land within this % of the goal. */
+  calorieTolerancePct: number;
+  intensityWeekly: number;
+}
+
+export const DEFAULT_GOALS: Goals = {
+  sleepMin: 450,
+  bedtimeMin: -60,
+  steps: 10000,
+  protein: 150,
+  calories: 2200,
+  calorieTolerancePct: 10,
+  intensityWeekly: 150,
+};

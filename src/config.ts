@@ -16,7 +16,7 @@ const EnvSchema = z.object({
   // Protects the dashboard with HTTP basic auth (username: anything, password: this).
   DASHBOARD_PASSWORD: z.string().optional(),
   // Days of history fetched on startup.
-  BACKFILL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+  BACKFILL_DAYS: z.coerce.number().int().min(1).max(365).default(90),
   // Days re-fetched on every scheduled sync (late-arriving data, e.g. last night's sleep).
   RESYNC_DAYS: z.coerce.number().int().min(1).max(14).default(3),
   // Fill unconfigured sources with generated sample data.

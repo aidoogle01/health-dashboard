@@ -1,5 +1,5 @@
 import type { Config } from '../config.js';
-import { addDays } from '../lib/dates.js';
+import { addDays, clockFromIso } from '../lib/dates.js';
 import type { Store } from '../store.js';
 import type { OuraDay, SourceAdapter, SyncResult } from '../types.js';
 
@@ -31,6 +31,8 @@ export interface SleepPeriod {
   efficiency?: number | null;
   lowest_heart_rate?: number | null;
   average_hrv?: number | null;
+  bedtime_start?: string | null;
+  bedtime_end?: string | null;
 }
 
 const num = (v: number | null | undefined) => (typeof v === 'number' ? v : undefined);
@@ -77,6 +79,8 @@ export function mergeOura(
     d.sleepEfficiency = num(p.efficiency);
     d.lowestHr = num(p.lowest_heart_rate);
     d.avgHrv = num(p.average_hrv);
+    d.bedtimeMin = clockFromIso(p.bedtime_start, true);
+    d.wakeMin = clockFromIso(p.bedtime_end, false);
   }
   return days;
 }

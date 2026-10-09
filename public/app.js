@@ -1,37 +1,81 @@
-// Health dashboard client: renders /api/dashboard and re-renders whenever the
-// server pushes an `update` event (a sync finished) over /api/stream.
+// Health dashboard client. Renders /api/dashboard into four views and re-renders
+// whenever the server pushes an `update` event (a sync finished) over /api/stream.
+
+import {
+  DEFAULT_GOALS,
+  M,
+  OUTCOMES,
+  compact,
+  compareBehaviours,
+  cumulativeBalance,
+  dayProgress,
+  fmtClock,
+  fmtHoursShort,
+  fmtInt,
+  focusItems,
+  habitStats,
+  habits,
+  rolling,
+  weeklyReview,
+} from './js/insights.js';
+import {
+  LEVEL_LABEL,
+  bullet,
+  divergingBars,
+  findLastIndex,
+  fmtDateLong,
+  fmtDateShort,
+  h,
+  habitGrid,
+  sleepSchedule,
+  sparkline,
+  statusIcon,
+  statusLine,
+  timeChart,
+} from './js/charts.js';
 
 const $ = (sel) => document.querySelector(sel);
-const SVG = 'http://www.w3.org/2000/svg';
+const num = (v) => typeof v === 'number' && Number.isFinite(v);
+const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : undefined);
+const HISTORY_DAYS = 90;
+const TABS = ['today', 'habits', 'insights', 'trends'];
 
+function storageGet(k) {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+}
+function storageSet(k, v) {
+  try {
+    localStorage.setItem(k, v);
+  } catch {
+    /* private mode */
+  }
+}
+
+const initialTab = location.hash.slice(1);
 const state = {
-  days: Number(localStorageGet('dash.range') ?? 30),
+  range: Number(storageGet('dash.range') ?? 30),
+  tab: TABS.includes(initialTab) ? initialTab : storageGet('dash.tab') ?? 'today',
+  outcome: storageGet('dash.outcome') ?? 'readiness',
   data: null,
-  tables: new Set(), // chart ids currently showing their table view
+  tables: new Set(),
   lastFetch: 0,
   live: false,
 };
-
-function localStorageGet(k) {
-  try { return localStorage.getItem(k); } catch { return null; }
-}
-function localStorageSet(k, v) {
-  try { localStorage.setItem(k, v); } catch { /* private mode */ }
-}
+if (!TABS.includes(state.tab)) state.tab = 'today';
+if (!OUTCOMES[state.outcome]) state.outcome = 'readiness';
 
 // ── Formatting ────────────────────────────────────────────
-const nf = new Intl.NumberFormat();
-const fmtInt = (v) => (v == null ? '–' : nf.format(Math.round(v)));
-const fmtHours = (min) => (min == null ? '–' : `${Math.floor(min / 60)}h ${String(Math.round(min % 60)).padStart(2, '0')}m`);
-const fmtKm = (m) => (m == null ? '–' : `${(m / 1000).toFixed(1)} km`);
+const fmtKm = (m) => (num(m) ? `${(m / 1000).toFixed(1)} km` : '–');
 const fmtDur = (s) => {
-  if (s == null) return '–';
-  const h = Math.floor(s / 3600);
+  if (!num(s)) return '–';
+  const hrs = Math.floor(s / 3600);
   const m = Math.round((s % 3600) / 60);
-  return h ? `${h}h ${String(m).padStart(2, '0')}m` : `${m} min`;
+  return hrs ? `${hrs}h ${String(m).padStart(2, '0')}m` : `${m} min`;
 };
-const fmtDateShort = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-const fmtDateLong = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 function fmtAgo(iso) {
   if (!iso) return 'never';
   const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
@@ -40,32 +84,7 @@ function fmtAgo(iso) {
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return `${Math.round(s / 86400)} d ago`;
 }
-function compact(v) {
-  if (Math.abs(v) >= 10000) return `${nf.format(Math.round(v / 1000))}K`;
-  return nf.format(v);
-}
-
-// ── Metric accessors (with fallbacks across devices) ──────
-const pick = (...vals) => vals.find((v) => typeof v === 'number');
-const M = {
-  sleepScore: (d) => pick(d.oura?.sleepScore, d.garmin?.sleepScore),
-  readiness: (d) => d.oura?.readinessScore,
-  steps: (d) => pick(d.garmin?.steps, d.oura?.steps),
-  eaten: (d) => d.mfp?.calories,
-  goal: (d) => d.mfp?.goalCalories,
-  burned: (d) => d.garmin?.totalCalories,
-  restingHr: (d) => pick(d.garmin?.restingHr, d.oura?.lowestHr),
-  hrv: (d) => d.oura?.avgHrv,
-  bodyBattery: (d) => d.garmin?.bodyBatteryHigh,
-  protein: (d) => d.mfp?.protein,
-  carbs: (d) => d.mfp?.carbs,
-  fat: (d) => d.mfp?.fat,
-  deep: (d) => d.oura?.deepSleepMin,
-  rem: (d) => d.oura?.remSleepMin,
-  light: (d) =>
-    d.oura?.totalSleepMin != null ? d.oura.totalSleepMin - (d.oura.deepSleepMin ?? 0) - (d.oura.remSleepMin ?? 0) : undefined,
-  sleepMin: (d) => pick(d.oura?.totalSleepMin, d.garmin?.sleepMin),
-};
+const signed = (v, fmt) => (v > 0 ? `+${fmt(v)}` : v < 0 ? `−${fmt(-v)}` : fmt(0));
 
 /** Dense array over every date in range so missing days show as gaps, not compressed time. */
 function denseDays(data) {
@@ -79,514 +98,563 @@ function denseDays(data) {
   return out;
 }
 
+/** Draw into a holder once it is in the document and has a width. */
+function deferDraw(holder, draw) {
+  requestAnimationFrame(() => draw(holder));
+  return holder;
+}
+
+function cardHead(title, note, tableId, extra) {
+  const head = h('div', { class: 'card-head' }, h('div', {}, h('h2', { text: title }), note ? h('div', { class: 'muted small', text: note }) : null));
+  if (extra) head.append(extra);
+  if (tableId) {
+    head.append(
+      h('button', {
+        class: 'link',
+        type: 'button',
+        text: state.tables.has(tableId) ? 'Show chart' : 'Show table',
+        onclick: () => {
+          state.tables.has(tableId) ? state.tables.delete(tableId) : state.tables.add(tableId);
+          render();
+        },
+      }),
+    );
+  }
+  return head;
+}
+
+function card(title, note, ...body) {
+  return h('section', { class: 'card' }, cardHead(title, note), ...body);
+}
+
+function dataTable(headers, rows) {
+  const table = h('table', { class: 'data' });
+  const head = table.createTHead().insertRow();
+  headers.forEach((t, i) => head.append(h('th', { class: i ? 'num' : null, text: t })));
+  const body = table.createTBody();
+  for (const r of rows) {
+    const tr = body.insertRow();
+    r.forEach((v, i) => tr.append(h('td', { class: i ? 'num' : null, text: v })));
+  }
+  return h('div', { class: 'table-wrap chart-table' }, table);
+}
+
+function legendItem(label, color, kind = 'line') {
+  const key = h('i', { class: kind === 'line' ? 'key-line' : 'key-rect' });
+  key.style.background = color;
+  return h('span', {}, key, label);
+}
+
+function miniStat(label, value) {
+  return h('div', { class: 'mini-stat' }, h('span', { class: 'muted small', text: label }), h('strong', { text: value }));
+}
+
 // ── Source status chips ───────────────────────────────────
-const ICON = {
-  ok: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="var(--status-good)"/><path d="M4.5 8.2l2.2 2.2 4.8-4.8" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  error: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="var(--status-critical)"/><path d="M8 4.5v4.2M8 11.2v.1" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>',
-  demo: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="var(--status-warning)"/><path d="M8 4.5v4.2M8 11.2v.1" stroke="#0b0b0b" stroke-width="1.8" stroke-linecap="round"/></svg>',
-  off: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="var(--text-muted)" stroke-width="1.6"/></svg>',
-  sync: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--grid)" stroke-width="2"/><path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.9s" repeatCount="indefinite"/></path></svg>',
-};
+const SYNC_ICON =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--grid)" stroke-width="2"/><path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.9s" repeatCount="indefinite"/></path></svg>';
+const OFF_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="var(--text-muted)" stroke-width="1.6"/></svg>';
 
 function renderSources(sources) {
   const wrap = $('#sources');
   wrap.replaceChildren();
   for (const s of sources) {
-    let icon, text;
-    if (s.syncing) [icon, text] = ['sync', 'Syncing…'];
-    else if (!s.configured) [icon, text] = ['off', 'Not connected'];
-    else if (s.lastError) [icon, text] = ['error', `Error · ${s.lastError}`];
-    else if (s.demo) [icon, text] = ['demo', `Demo data · ${fmtAgo(s.lastSuccessAt)}`];
-    else [icon, text] = ['ok', `Synced ${fmtAgo(s.lastSuccessAt)}`];
-    const el = document.createElement('div');
-    el.className = 'source';
-    el.innerHTML = ICON[icon];
-    const name = document.createElement('strong');
-    name.textContent = s.label;
-    const st = document.createElement('span');
-    st.className = 'state';
-    st.textContent = text;
-    el.title = s.nextSyncAt ? `Next sync ${new Date(s.nextSyncAt).toLocaleTimeString()}` : '';
-    el.append(name, st);
-    wrap.append(el);
+    let icon;
+    let text;
+    if (s.syncing) [icon, text] = [SYNC_ICON, 'Syncing…'];
+    else if (!s.configured) [icon, text] = [OFF_ICON, 'Not connected'];
+    else if (s.lastError) [icon, text] = ['critical', `Error · ${s.lastError}`];
+    else if (s.demo) [icon, text] = ['warning', `Sample data · ${fmtAgo(s.lastSuccessAt)}`];
+    else [icon, text] = ['good', `Synced ${fmtAgo(s.lastSuccessAt)}`];
+    const iconEl = icon.startsWith('<') ? Object.assign(h('span', { class: 'status-icon' }), { innerHTML: icon }) : statusIcon(icon);
+    wrap.append(
+      h('div', { class: 'source', title: s.nextSyncAt ? `Next sync ${new Date(s.nextSyncAt).toLocaleTimeString()}` : '' }, iconEl, h('strong', { text: s.label }), h('span', { class: 'state', text })),
+    );
   }
 }
 
-// ── Stat tiles ────────────────────────────────────────────
-const TILES = [
-  { label: 'Sleep score', get: M.sleepScore, up: true },
-  { label: 'Readiness', get: M.readiness, up: true },
-  { label: 'Steps', get: M.steps, up: true, fmt: compact },
-  { label: 'Calories eaten', get: M.eaten, unit: 'kcal', goal: M.goal },
-  { label: 'Calories burned', get: M.burned, unit: 'kcal', up: true },
-  { label: 'Resting HR', get: M.restingHr, unit: 'bpm', up: false },
-  { label: 'HRV', get: M.hrv, unit: 'ms', up: true },
-  { label: 'Body Battery', get: M.bodyBattery, up: true },
-];
+// ── TODAY ─────────────────────────────────────────────────
+function renderToday(days, goals) {
+  const today = days.at(-1);
+  const isLive = today.date === isoToday();
+  const p = isLive ? dayProgress(new Date()) : 1;
 
-function renderTiles(days) {
-  const wrap = $('#tiles');
-  wrap.replaceChildren();
-  const todayIso = days.at(-1)?.date;
+  const items = focusItems(days, goals, new Date());
+  const focus = card(
+    "Today's focus",
+    'What would move your numbers most today',
+    items.length
+      ? h(
+          'ul',
+          { class: 'focus-list' },
+          ...items.map((it) =>
+            h('li', {}, statusIcon(it.level), h('div', {}, h('span', { class: 'visually-hidden', text: `${LEVEL_LABEL[it.level]}: ` }), h('strong', { text: it.title }), h('p', { text: it.detail }))),
+          ),
+        )
+      : h('p', { class: 'muted', text: 'Nothing needs attention right now. Keep doing what you are doing.' }),
+  );
+
+  const paceStatus = (value, target, unit, fmt = fmtInt) => {
+    if (!num(value)) return { level: 'info', text: 'No data yet' };
+    if (value >= target) return { level: 'good', text: 'Goal done' };
+    if (!isLive || p >= 1) return { level: 'warning', text: `${fmt(target - value)} ${unit} short` };
+    const pace = target * p;
+    return value >= pace * 0.9
+      ? { level: 'good', text: `On pace · ${fmt(target - value)} ${unit} to go` }
+      : { level: 'warning', text: `${fmt(pace - value)} ${unit} behind pace for this time of day` };
+  };
+
+  const steps = M.steps(today);
+  const protein = M.protein(today);
+  const eaten = M.eaten(today);
+  const calGoal = M.calorieGoal(today, goals);
+  const tol = goals.calorieTolerancePct / 100;
+  const calStatus = !num(eaten)
+    ? { level: 'info', text: 'Nothing logged yet today' }
+    : eaten > calGoal * (1 + tol)
+      ? { level: 'warning', text: `${fmtInt(eaten - calGoal)} kcal over goal` }
+      : !isLive && eaten < calGoal * (1 - tol)
+        ? { level: 'warning', text: `${fmtInt(calGoal - eaten)} kcal under goal` }
+        : { level: 'good', text: `${fmtInt(Math.max(0, calGoal - eaten))} kcal left` };
+
+  // Week to date (Monday start) for intensity minutes.
+  const dow = (new Date(`${today.date}T12:00:00`).getDay() + 6) % 7;
+  const week = days.slice(-(dow + 1));
+  const hasIntensity = week.some((d) => num(M.intensity(d)));
+  const weekIntensity = week.reduce((a, d) => a + (M.intensity(d) ?? 0), 0);
+  const weekPace = goals.intensityWeekly * ((dow + p) / 7);
+  const weekStatus = !hasIntensity
+    ? { level: 'info', text: 'No data yet' }
+    : weekIntensity >= goals.intensityWeekly
+      ? { level: 'good', text: 'Weekly goal done' }
+      : weekIntensity >= weekPace * 0.9
+        ? { level: 'good', text: `On pace · ${fmtInt(goals.intensityWeekly - weekIntensity)} min to go this week` }
+        : { level: 'warning', text: `${fmtInt(weekPace - weekIntensity)} min behind pace for the week` };
+
+  const sleep = M.sleepMin(today);
+  const bed = M.bedtime(today);
+
+  const progress = card(
+    'Goal progress',
+    isLive ? "Today so far · the small tick shows where you'd be on pace" : fmtDateLong(today.date),
+    h(
+      'div',
+      { class: 'bullets' },
+      bullet({ label: 'Steps', value: steps, target: goals.steps, fmt: fmtInt, pace: isLive && p < 1 ? goals.steps * p : undefined, status: paceStatus(steps, goals.steps, 'steps') }),
+      bullet({ label: 'Protein', value: protein, target: goals.protein, unit: 'g', fmt: fmtInt, pace: isLive && p < 1 ? goals.protein * p : undefined, status: paceStatus(protein, goals.protein, 'g') }),
+      bullet({ label: 'Calories', value: eaten, target: calGoal, unit: 'kcal', fmt: fmtInt, band: [calGoal * (1 - tol), calGoal * (1 + tol)], status: calStatus }),
+      bullet({ label: 'Intensity minutes this week', value: hasIntensity ? weekIntensity : undefined, target: goals.intensityWeekly, unit: 'min', fmt: fmtInt, pace: weekPace < goals.intensityWeekly ? weekPace : undefined, status: weekStatus }),
+      bullet({
+        label: 'Sleep last night',
+        value: sleep,
+        target: goals.sleepMin,
+        fmt: fmtHoursShort,
+        status: !num(sleep) ? { level: 'info', text: 'No sleep recorded' } : sleep >= goals.sleepMin ? { level: 'good', text: 'Goal met' } : { level: 'warning', text: `${fmtHoursShort(goals.sleepMin - sleep)} short` },
+      }),
+      h(
+        'div',
+        { class: 'bullet' },
+        h('div', { class: 'bullet-head' }, h('span', { class: 'bullet-label', text: 'Bedtime last night' }), h('span', { class: 'bullet-value' }, h('strong', { text: fmtClock(bed) }), ` / ${fmtClock(goals.bedtimeMin)}`)),
+        !num(bed)
+          ? statusLine('info', 'No bedtime recorded')
+          : bed <= goals.bedtimeMin
+            ? statusLine('good', `${Math.round(goals.bedtimeMin - bed)} min before your target`)
+            : statusLine('warning', `${Math.round(bed - goals.bedtimeMin)} min after your target`),
+      ),
+    ),
+  );
+
+  // Recovery signals against your own 30-day baseline.
+  const TILES = [
+    { label: 'Readiness', get: M.readiness, up: true },
+    { label: 'Sleep score', get: M.sleepScore, up: true },
+    { label: 'HRV', get: M.hrv, unit: 'ms', up: true },
+    { label: 'Resting HR', get: M.restingHr, unit: 'bpm', up: false },
+    { label: 'Body Battery', get: M.bodyBattery, up: true },
+    { label: 'Calories burned', get: M.burned, unit: 'kcal', up: null },
+  ];
+  const tiles = h('div', { class: 'tiles' });
   for (const t of TILES) {
-    const idx = findLastIndex(days, (d) => typeof t.get(d) === 'number');
-    const tile = document.createElement('div');
-    tile.className = 'tile';
-    const label = document.createElement('div');
-    label.className = 'label';
-    label.textContent = t.label;
-    const value = document.createElement('div');
-    value.className = 'value';
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    tile.append(label, value, meta);
-
+    const idx = findLastIndex(days, (d) => num(t.get(d)));
+    const tile = h('div', { class: 'tile' }, h('div', { class: 'label', text: t.label }));
     if (idx < 0) {
-      value.textContent = '–';
-      meta.textContent = 'No data yet';
-      wrap.append(tile);
+      tile.append(h('div', { class: 'value', text: '–' }), h('div', { class: 'meta', text: 'No data yet' }));
+      tiles.append(tile);
       continue;
     }
     const day = days[idx];
     const v = t.get(day);
-    value.textContent = (t.fmt ?? fmtInt)(v);
-    if (t.unit) {
-      const u = document.createElement('span');
-      u.className = 'unit';
-      u.textContent = t.unit;
-      value.append(u);
+    tile.append(h('div', { class: 'value' }, fmtInt(v), t.unit ? h('span', { class: 'unit', text: t.unit }) : null));
+    const meta = h('div', { class: 'meta' }, h('span', { text: day.date === isoToday() ? 'Today' : fmtDateShort(day.date) }));
+    const prev = days.slice(Math.max(0, idx - 30), idx).map(t.get).filter(num);
+    if (prev.length >= 7 && t.up !== null) {
+      const avg = mean(prev);
+      const pct = avg ? Math.round(((v - avg) / avg) * 100) : 0;
+      const better = v - avg > 0 === t.up;
+      meta.append(pct === 0 ? h('span', { class: 'delta', text: 'At your 30-day average' }) : h('span', { class: `delta ${better ? 'good' : 'bad'}`, text: `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs 30-day avg` }));
     }
-
-    const when = document.createElement('span');
-    when.textContent = day.date === todayIso ? 'Today' : fmtDateShort(day.date);
-    meta.append(when);
-
-    const delta = document.createElement('span');
-    delta.className = 'delta';
-    if (t.goal && typeof t.goal(day) === 'number') {
-      const left = t.goal(day) - v;
-      delta.textContent = left >= 0 ? `${fmtInt(left)} left of ${fmtInt(t.goal(day))}` : `${fmtInt(-left)} over goal`;
-    } else {
-      const prev = days.slice(Math.max(0, idx - 7), idx).map(t.get).filter((x) => typeof x === 'number');
-      if (prev.length >= 3) {
-        const avg = prev.reduce((a, b) => a + b, 0) / prev.length;
-        const diff = v - avg;
-        const pct = avg ? Math.round((diff / avg) * 100) : 0;
-        if (pct !== 0) {
-          const better = diff > 0 === t.up;
-          delta.classList.add(better ? 'good' : 'bad');
-          delta.textContent = `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs 7-day avg`;
-        } else delta.textContent = 'Even with 7-day avg';
-      }
-    }
-    meta.append(delta);
-
-    const sparkVals = days.slice(-14).map(t.get);
-    if (sparkVals.filter((x) => typeof x === 'number').length >= 2) tile.append(sparkline(sparkVals));
-    wrap.append(tile);
-  }
-}
-
-function findLastIndex(arr, fn) {
-  for (let i = arr.length - 1; i >= 0; i--) if (fn(arr[i])) return i;
-  return -1;
-}
-
-function sparkline(vals) {
-  const w = 140, h = 28, pad = 3;
-  const nums = vals.filter((v) => typeof v === 'number');
-  const min = Math.min(...nums), max = Math.max(...nums);
-  const x = (i) => pad + (i / (vals.length - 1)) * (w - pad * 2);
-  const y = (v) => (max === min ? h / 2 : h - pad - ((v - min) / (max - min)) * (h - pad * 2));
-  const svg = el('svg', { class: 'spark', viewBox: `0 0 ${w} ${h}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' });
-  svg.append(el('path', { d: linePath(vals, x, y), fill: 'none', stroke: 'var(--axis)', 'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-  const last = findLastIndex(vals, (v) => typeof v === 'number');
-  svg.append(el('circle', { cx: x(last), cy: y(vals[last]), r: 2.5, fill: 'var(--accent)' }));
-  return svg;
-}
-
-// ── Charts ────────────────────────────────────────────────
-const CHARTS = [
-  {
-    id: 'scores', title: 'Sleep & readiness', note: 'Oura · score 0–100', type: 'line', fmt: fmtInt,
-    series: [
-      { label: 'Sleep score', get: M.sleepScore, color: 'var(--series-1)' },
-      { label: 'Readiness', get: M.readiness, color: 'var(--series-2)' },
-    ],
-  },
-  {
-    id: 'energy', title: 'Energy balance', note: 'kcal · MyFitnessPal vs Garmin', type: 'line', zero: true, fmt: fmtInt,
-    series: [
-      { label: 'Eaten', get: M.eaten, color: 'var(--series-1)' },
-      { label: 'Burned', get: M.burned, color: 'var(--series-2)' },
-    ],
-  },
-  {
-    id: 'macros', title: 'Macros', note: 'grams · MyFitnessPal', type: 'stack', fmt: (v) => `${fmtInt(v)} g`,
-    series: [
-      { label: 'Protein', get: M.protein, color: 'var(--series-1)' },
-      { label: 'Carbs', get: M.carbs, color: 'var(--series-2)' },
-      { label: 'Fat', get: M.fat, color: 'var(--series-3)' },
-    ],
-  },
-  {
-    id: 'steps', title: 'Steps', note: 'Garmin (Oura fallback)', type: 'bar', fmt: fmtInt,
-    series: [{ label: 'Steps', get: M.steps, color: 'var(--series-1)' }],
-  },
-  {
-    id: 'sleep', title: 'Sleep stages', note: 'hours · Oura', type: 'stack', fmt: fmtHours, axisFmt: (m) => `${Math.round(m / 60)}h`, tickStep: 120,
-    series: [
-      { label: 'Deep', get: M.deep, color: 'var(--series-1)' },
-      { label: 'REM', get: M.rem, color: 'var(--series-2)' },
-      { label: 'Light', get: M.light, color: 'var(--series-3)' },
-    ],
-  },
-  {
-    id: 'rhr', title: 'Resting heart rate', note: 'bpm · Garmin (Oura fallback)', type: 'line', fmt: (v) => `${fmtInt(v)} bpm`,
-    series: [{ label: 'Resting HR', get: M.restingHr, color: 'var(--series-1)' }],
-  },
-  {
-    id: 'hrv', title: 'Heart rate variability', note: 'ms · Oura nightly average', type: 'line', fmt: (v) => `${fmtInt(v)} ms`,
-    series: [{ label: 'HRV', get: M.hrv, color: 'var(--series-1)' }],
-  },
-];
-
-function el(tag, attrs = {}) {
-  const n = document.createElementNS(SVG, tag);
-  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, String(v));
-  return n;
-}
-
-function linePath(vals, x, y) {
-  let d = '';
-  let pen = false;
-  vals.forEach((v, i) => {
-    if (typeof v !== 'number') { pen = false; return; }
-    d += `${pen ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`;
-    pen = true;
-  });
-  return d;
-}
-
-/** Round a range out to "nice" tick values. */
-function niceScale(min, max, count = 4, step0) {
-  if (min === max) { min -= 1; max += 1; }
-  const raw = (max - min) / count;
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const step = step0 ?? [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw);
-  const lo = Math.floor(min / step) * step;
-  const hi = Math.ceil(max / step) * step;
-  const ticks = [];
-  for (let t = lo; t <= hi + step / 2; t += step) ticks.push(Math.round(t * 1000) / 1000);
-  return { lo, hi, ticks };
-}
-
-function renderCharts(days) {
-  const grid = $('#charts');
-  grid.replaceChildren();
-  for (const c of CHARTS) grid.append(chartCard(c, days));
-}
-
-function chartCard(c, days) {
-  const card = document.createElement('section');
-  card.className = 'card';
-  const head = document.createElement('div');
-  head.className = 'card-head';
-  const titleWrap = document.createElement('div');
-  const h = document.createElement('h2');
-  h.textContent = c.title;
-  const note = document.createElement('div');
-  note.className = 'muted small';
-  note.textContent = c.note;
-  titleWrap.append(h, note);
-  const toggle = document.createElement('button');
-  toggle.className = 'link';
-  toggle.type = 'button';
-  const showTable = state.tables.has(c.id);
-  toggle.textContent = showTable ? 'Show chart' : 'Show table';
-  toggle.addEventListener('click', () => {
-    state.tables.has(c.id) ? state.tables.delete(c.id) : state.tables.add(c.id);
-    card.replaceWith(chartCard(c, days));
-  });
-  head.append(titleWrap, toggle);
-  card.append(head);
-
-  const hasData = days.some((d) => c.series.some((s) => typeof s.get(d) === 'number'));
-  if (!hasData) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-chart';
-    empty.textContent = 'No data in this range yet — connect the source or wait for the next sync.';
-    card.append(empty);
-    return card;
+    tile.append(meta);
+    const spark = days.slice(-14).map(t.get);
+    if (spark.filter(num).length >= 2) tile.append(sparkline(spark));
+    tiles.append(tile);
   }
 
-  if (c.series.length > 1) {
-    const legend = document.createElement('div');
-    legend.className = 'legend';
-    for (const s of c.series) {
-      const item = document.createElement('span');
-      const key = document.createElement('i');
-      key.className = c.type === 'line' ? 'key-line' : 'key-rect';
-      key.style.background = s.color;
-      item.append(key, document.createTextNode(s.label));
-      legend.append(item);
-    }
-    card.append(legend);
-  }
-
-  if (showTable) card.append(chartTable(c, days));
-  else {
-    const holder = document.createElement('div');
-    holder.className = 'chart';
-    card.append(holder);
-    // Draw after insertion so the width is known.
-    requestAnimationFrame(() => drawChart(holder, c, days));
-  }
-  return card;
+  $('#panel-today').replaceChildren(h('div', { class: 'grid-2' }, focus, progress), h('h3', { class: 'section-title', text: 'Recovery signals' }), tiles);
 }
 
-function chartTable(c, days) {
-  const wrap = document.createElement('div');
-  wrap.className = 'table-wrap chart-table';
-  const table = document.createElement('table');
-  table.className = 'data';
+// ── HABITS ────────────────────────────────────────────────
+function renderHabits(days, goals) {
+  const todayIso = isoToday();
+  const rows = habits(goals).map((habit) => ({ habit, stats: habitStats(habit, days, todayIso) }));
+  const fmtValue = (habit, d) => {
+    const v = habit.value(d);
+    if (!num(v)) return '–';
+    if (habit.id === 'sleep') return fmtHoursShort(v);
+    if (habit.id === 'bedtime') return fmtClock(v);
+    if (habit.id === 'protein') return `${fmtInt(v)} g`;
+    if (habit.id === 'calories') return `${fmtInt(v)} of ${fmtInt(M.calorieGoal(d, goals))} kcal`;
+    return fmtInt(v);
+  };
+
+  const ranked = rows.filter((r) => num(r.stats.rate)).sort((a, b) => b.stats.rate - a.stats.rate);
+  const lede = ranked.length
+    ? h(
+        'p',
+        { class: 'lede' },
+        'Most consistent: ',
+        h('strong', { text: `${ranked[0].habit.label.toLowerCase()} (${Math.round(ranked[0].stats.rate * 100)}%)` }),
+        '. Most room to improve: ',
+        h('strong', { text: `${ranked.at(-1).habit.label.toLowerCase()} (${Math.round(ranked.at(-1).stats.rate * 100)}%)` }),
+        '.',
+      )
+    : h('p', { class: 'lede muted', text: 'Not enough data yet.' });
+  const consistency = card('Goal consistency', 'Each square is a day. Today is left out of daily goals until it ends.', lede, habitGrid(rows, days, fmtValue));
+
+  const beds = days.map(M.bedtime).filter(num);
+  const wakes = days.map(M.wake).filter(num);
+  const sd = (xs) => {
+    const m = mean(xs);
+    return Math.sqrt(mean(xs.map((x) => (x - m) ** 2)));
+  };
+  const onTime = beds.filter((b) => b <= goals.bedtimeMin).length;
+  const stats = h(
+    'div',
+    { class: 'mini-stats' },
+    miniStat('Average bedtime', fmtClock(mean(beds))),
+    miniStat('Bedtime varies by', beds.length > 2 ? `±${Math.round(sd(beds))} min` : '–'),
+    miniStat('Average wake', fmtClock(mean(wakes))),
+    miniStat('In bed on time', beds.length ? `${onTime} of ${beds.length} nights` : '–'),
+  );
+  const schedBody = state.tables.has('schedule')
+    ? dataTable(['Night before', 'In bed', 'Woke', 'Asleep'], [...days].reverse().map((d) => [fmtDateLong(d.date), fmtClock(M.bedtime(d)), fmtClock(M.wake(d)), fmtHoursShort(M.sleepMin(d))]))
+    : beds.length
+      ? deferDraw(h('div', { class: 'chart' }), (el) => sleepSchedule(el, days, M.bedtime, M.wake, goals.bedtimeMin, (d) => fmtHoursShort(M.sleepMin(d))))
+      : h('div', { class: 'empty-chart', text: 'No bedtimes recorded yet. Connect Oura or Garmin.' });
+  const schedule = h(
+    'section',
+    { class: 'card' },
+    cardHead('Sleep schedule', 'Each bar runs from bedtime to wake. A regular schedule is one of the simplest ways to sleep better.', 'schedule'),
+    stats,
+    beds.length ? h('div', { class: 'legend' }, legendItem('In bed by target', 'var(--series-1)', 'rect'), legendItem('Later than target', 'var(--series-2)', 'rect')) : null,
+    schedBody,
+  );
+
+  $('#panel-habits').replaceChildren(consistency, schedule);
+}
+
+// ── INSIGHTS ──────────────────────────────────────────────
+function renderInsights(days, goals) {
+  const todayIso = isoToday();
+  const outcome = OUTCOMES[state.outcome];
+  const results = compareBehaviours(days, goals, state.outcome, todayIso);
+  const strongest = results.find((r) => r.enough && Math.abs(r.diff) >= 2);
+
+  const seg = h('div', { class: 'segmented', role: 'group', 'aria-label': 'Measure recovery by' });
+  for (const [key, o] of Object.entries(OUTCOMES)) {
+    seg.append(
+      h('button', {
+        type: 'button',
+        text: o.label,
+        'aria-pressed': String(key === state.outcome),
+        onclick: () => {
+          state.outcome = key;
+          storageSet('dash.outcome', key);
+          render();
+        },
+      }),
+    );
+  }
+
+  const drivers = h(
+    'section',
+    { class: 'card span-2' },
+    cardHead('What goes with better recovery', `Next-morning ${outcome.label.toLowerCase()} on days with each habit, compared with days without it · last ${HISTORY_DAYS} days`, null, seg),
+    strongest
+      ? h(
+          'p',
+          { class: 'lede' },
+          'Your clearest pattern: ',
+          h('strong', { text: strongest.label.toLowerCase() }),
+          ` goes with ${Math.abs(Math.round(strongest.diff * 10) / 10)} ${outcome.unit} ${strongest.diff > 0 ? 'higher' : 'lower'} ${outcome.label.toLowerCase()} the next morning (${fmtInt(strongest.meanYes)} vs ${fmtInt(strongest.meanNo)}).`,
+        )
+      : h('p', { class: 'lede muted', text: 'No clear pattern yet. Each habit needs at least 5 days with it and 5 without.' }),
+    divergingBars(results, outcome.unit, outcome.label),
+    h('p', { class: 'footnote', text: 'These are patterns in your own data, not proof of cause: a late night and a low score can share a reason, like stress or travel. Use them to choose what to try, then watch whether the number moves.' }),
+  );
+
+  // Week in review
+  const wr = weeklyReview(days, goals, todayIso);
+  const table = h('table', { class: 'data review' });
   const head = table.createTHead().insertRow();
-  for (const label of ['Date', ...c.series.map((s) => s.label)]) {
-    const th = document.createElement('th');
-    th.textContent = label;
-    if (label !== 'Date') th.className = 'num';
-    head.append(th);
-  }
+  ['', 'Last 7 days', 'Previous 7', 'Change'].forEach((t, i) => head.append(h('th', { class: i ? 'num' : null, text: t })));
   const body = table.createTBody();
-  for (const d of [...days].reverse()) {
-    const row = body.insertRow();
-    row.insertCell().textContent = fmtDateLong(d.date);
-    for (const s of c.series) {
-      const cell = row.insertCell();
-      cell.className = 'num';
-      const v = s.get(d);
-      cell.textContent = typeof v === 'number' ? c.fmt(v) : '–';
-    }
-  }
-  wrap.append(table);
-  return wrap;
-}
-
-function drawChart(holder, c, days) {
-  const W = Math.max(280, holder.clientWidth);
-  const H = 200;
-  const m = { top: 14, right: c.type === 'line' ? 44 : 8, bottom: 24, left: 44 };
-  const iw = W - m.left - m.right;
-  const ih = H - m.top - m.bottom;
-  const n = days.length;
-  const band = iw / n;
-  const cx = (i) => m.left + band * (i + 0.5);
-
-  const vals = c.series.map((s) => days.map(s.get));
-  let lo, hi;
-  if (c.type === 'stack') {
-    lo = 0;
-    hi = Math.max(1, ...days.map((_, i) => vals.reduce((sum, v) => sum + (v[i] ?? 0), 0)));
-  } else {
-    const nums = vals.flat().filter((v) => typeof v === 'number');
-    lo = c.type === 'bar' || c.zero ? 0 : Math.min(...nums);
-    hi = Math.max(...nums);
-    if (c.type === 'line' && !c.zero) { const pad = (hi - lo) * 0.15 || 2; lo -= pad; hi += pad; }
-  }
-  const scale = niceScale(lo, hi, 4, c.tickStep);
-  const y = (v) => m.top + ih - ((v - scale.lo) / (scale.hi - scale.lo)) * ih;
-
-  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, tabindex: 0, role: 'img', 'aria-label': `${c.title} chart. Use arrow keys to read values; a table view is available.` });
-
-  // Grid + y ticks
-  for (const t of scale.ticks) {
-    svg.append(el('line', { x1: m.left, x2: W - m.right, y1: y(t), y2: y(t), stroke: t === scale.lo ? 'var(--axis)' : 'var(--grid)', 'stroke-width': 1, 'shape-rendering': 'crispEdges' }));
-    const label = el('text', { x: m.left - 8, y: y(t), 'text-anchor': 'end', 'dominant-baseline': 'middle', class: 'axis-text' });
-    label.textContent = c.axisFmt ? c.axisFmt(t) : compact(t);
-    svg.append(label);
-  }
-  // X labels: ~5 evenly spaced dates
-  const every = Math.max(1, Math.ceil(n / 5));
-  for (let i = n - 1; i >= 0; i -= every) {
-    const label = el('text', { x: cx(i), y: H - 6, 'text-anchor': 'middle', class: 'axis-text' });
-    label.textContent = fmtDateShort(days[i].date);
-    svg.append(label);
-  }
-
-  // Hover band / crosshair (drawn under the marks)
-  const hoverBand = el('rect', { y: m.top, height: ih, width: band, fill: 'var(--hover)', visibility: 'hidden' });
-  const crosshair = el('line', { y1: m.top, y2: m.top + ih, stroke: 'var(--axis)', 'stroke-width': 1, visibility: 'hidden' });
-  svg.append(c.type === 'line' ? crosshair : hoverBand);
-
-  if (c.type === 'line') {
-    vals.forEach((v, si) => {
-      svg.append(el('path', { d: linePath(v, cx, y), fill: 'none', stroke: c.series[si].color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-      // Isolated points (neighbors missing) would be invisible as a path: draw them as dots.
-      v.forEach((p, i) => {
-        if (typeof p === 'number' && typeof v[i - 1] !== 'number' && typeof v[i + 1] !== 'number') {
-          svg.append(el('circle', { cx: cx(i), cy: y(p), r: 3, fill: c.series[si].color }));
-        }
-      });
-    });
-    // End markers + direct labels, skipped when two would collide.
-    const ends = vals
-      .map((v, si) => ({ si, i: findLastIndex(v, (p) => typeof p === 'number') }))
-      .filter((e) => e.i >= 0)
-      .map((e) => ({ ...e, v: vals[e.si][e.i], py: y(vals[e.si][e.i]) }));
-    const collide = ends.some((a, ai) => ends.some((b, bi) => ai < bi && Math.abs(a.py - b.py) < 14));
-    for (const e of ends) {
-      svg.append(el('circle', { cx: cx(e.i), cy: e.py, r: 4, fill: c.series[e.si].color, stroke: 'var(--surface)', 'stroke-width': 2 }));
-      if (!collide) {
-        const t = el('text', { x: cx(e.i) + 8, y: e.py, 'dominant-baseline': 'middle', class: 'end-label' });
-        t.textContent = compact(Math.round(e.v));
-        svg.append(t);
+  for (const r of wr.rows) {
+    const tr = body.insertRow();
+    tr.append(h('td', { text: r.label }), h('td', { class: 'num', text: num(r.cur) ? r.fmt(r.cur) : '–' }), h('td', { class: 'num muted', text: num(r.prev) ? r.fmt(r.prev) : '–' }));
+    let change = '–';
+    let cls = 'num';
+    if (num(r.diff)) {
+      const minutes = r.label === 'Bedtime' || r.label === 'Sleep';
+      const d = minutes ? Math.round(r.diff) : Math.round(r.diff * 10) / 10;
+      const unit = minutes ? ' min' : r.label === 'HRV' ? ' ms' : r.label === 'Resting HR' ? ' bpm' : r.label === 'Protein' ? ' g' : '';
+      if (Math.abs(d) < (minutes ? 1 : 0.5)) change = 'No change';
+      else {
+        change = r.label === 'Bedtime' ? `${Math.abs(d)} min ${d > 0 ? 'later' : 'earlier'}` : `${d > 0 ? '▲' : '▼'} ${fmtInt(Math.abs(d))}${unit}`;
+        if (r.upGood !== null) cls += d > 0 === r.upGood ? ' good-text' : ' bad-text';
       }
     }
-  } else {
-    const bw = Math.min(24, Math.max(2, band - 2));
-    const r = Math.min(4, bw / 2);
-    days.forEach((_, i) => {
-      let base = scale.lo;
-      const segs = vals.map((v, si) => ({ v: v[i], si })).filter((s) => typeof s.v === 'number' && s.v > 0);
-      segs.forEach((s, k) => {
-        const top = k === segs.length - 1;
-        const y0 = y(base);
-        const y1 = y(base + s.v);
-        base += s.v;
-        // 2px surface gap between stacked segments.
-        const gap = k > 0 ? 2 : 0;
-        const h = Math.max(0, y0 - y1 - gap);
-        if (h <= 0) return;
-        svg.append(el('path', { d: barPath(cx(i) - bw / 2, y1, bw, h, top ? Math.min(r, h) : 0), fill: c.series[s.si].color }));
-      });
-    });
+    tr.append(h('td', { class: cls, text: change }));
+  }
+  const hits = h(
+    'div',
+    { class: 'hit-row' },
+    ...wr.goalsHit.map((g) =>
+      h(
+        'div',
+        { class: 'hit' },
+        h('span', { class: 'muted small', text: g.label }),
+        h('strong', { text: `${g.cur} of 7` }),
+        h('span', { class: `small ${g.cur > g.prev ? 'good-text' : g.cur < g.prev ? 'bad-text' : 'muted'}`, text: g.cur === g.prev ? 'Same' : `${g.cur > g.prev ? '▲' : '▼'} ${Math.abs(g.cur - g.prev)}`, title: `Previous 7 days: ${g.prev} of 7` }),
+      ),
+    ),
+  );
+  const review = h(
+    'section',
+    { class: 'card' },
+    cardHead('Week in review', wr.curRange[0] ? `${fmtDateShort(wr.curRange[0])} – ${fmtDateShort(wr.curRange[1])}, against the 7 days before` : ''),
+    h('h3', { class: 'mini-title', text: 'Days you hit each goal · change vs the 7 days before' }),
+    hits,
+    h('h3', { class: 'mini-title', text: 'Averages' }),
+    h('div', { class: 'table-wrap' }, table),
+  );
+
+  // Running calorie balance over the last 30 days
+  const range = days.slice(-30);
+  const bal = cumulativeBalance(range, todayIso);
+  const kg = bal.total / 7700;
+  const energyBody = state.tables.has('balance')
+    ? dataTable(['Date', 'Eaten', 'Burned', 'Running total'], range.map((d, i) => [fmtDateLong(d.date), fmtInt(M.eaten(d)), fmtInt(M.burned(d)), fmtInt(bal.series[i])]).reverse())
+    : bal.counted >= 2
+      ? deferDraw(h('div', { class: 'chart' }), (el) =>
+          timeChart(el, { title: 'Running calorie balance', type: 'line', zero: true, area: true, fmt: (v) => `${fmtInt(v)} kcal`, series: [{ label: 'Running total', color: 'var(--series-1)', values: bal.series }] }, range.map((d) => d.date)),
+        )
+      : h('div', { class: 'empty-chart', text: 'Needs MyFitnessPal and Garmin data for the same days.' });
+  const energy = h(
+    'section',
+    { class: 'card' },
+    cardHead('Running calorie balance', 'Calories eaten minus burned, added up day by day · last 30 days', 'balance'),
+    bal.counted >= 2
+      ? h('p', { class: 'lede' }, h('strong', { text: `${signed(Math.round(bal.total), fmtInt)} kcal` }), ` over ${bal.counted} days, roughly ${kg >= 0 ? '+' : '−'}${Math.abs(kg).toFixed(1)} kg of body weight.`)
+      : null,
+    energyBody,
+    h('p', { class: 'footnote', text: 'Watches can misjudge calories burned by 10–20%, so read this as a direction rather than an exact weight change. The kg figure uses 7,700 kcal per kg.' }),
+  );
+
+  $('#panel-insights').replaceChildren(h('div', { class: 'grid-2' }, drivers, review, energy));
+}
+
+// ── TRENDS ────────────────────────────────────────────────
+function renderTrends(days, goals, activities) {
+  const dates = days.map((d) => d.date);
+  const series = (label, get, color) => ({ label, color, values: days.map(get) });
+  const calGoal = M.calorieGoal(days.at(-1), goals);
+  const CHARTS = [
+    { id: 'scores', title: 'Sleep & readiness', note: 'Oura · score 0–100', type: 'line', fmt: fmtInt, series: [series('Sleep score', M.sleepScore, 'var(--series-1)'), series('Readiness', M.readiness, 'var(--series-2)')] },
+    {
+      id: 'energy',
+      title: 'Calories eaten vs burned',
+      note: 'kcal · MyFitnessPal vs Garmin',
+      type: 'line',
+      zero: true,
+      fmt: fmtInt,
+      series: [series('Eaten', M.eaten, 'var(--series-1)'), series('Burned', M.burned, 'var(--series-2)')],
+      goal: num(calGoal) ? { value: calGoal, label: `Goal ${fmtInt(calGoal)}` } : undefined,
+    },
+    { id: 'macros', title: 'Macros', note: 'grams · MyFitnessPal', type: 'stack', fmt: (v) => `${fmtInt(v)} g`, series: [series('Protein', M.protein, 'var(--series-1)'), series('Carbs', M.carbs, 'var(--series-2)'), series('Fat', M.fat, 'var(--series-3)')] },
+    {
+      id: 'steps',
+      title: 'Steps',
+      note: 'Bars are days; the line is your 7-day average',
+      type: 'bar',
+      fmt: fmtInt,
+      series: [series('Steps', M.steps, 'var(--series-1)')],
+      rolling: rolling(days.map(M.steps)),
+      goal: { value: goals.steps, label: `Goal ${compact(goals.steps)}` },
+    },
+    {
+      id: 'sleep',
+      title: 'Sleep stages',
+      note: 'hours · Oura',
+      type: 'stack',
+      fmt: fmtHoursShort,
+      axisFmt: (m) => `${Math.round(m / 60)}h`,
+      tickStep: 120,
+      series: [series('Deep', M.deep, 'var(--series-1)'), series('REM', M.rem, 'var(--series-2)'), series('Light', M.light, 'var(--series-3)')],
+      goal: { value: goals.sleepMin, label: `Goal ${fmtHoursShort(goals.sleepMin)}`, fmt: fmtHoursShort },
+    },
+    { id: 'rhr', title: 'Resting heart rate', note: 'bpm · dots are nights, the line is the 7-day average · lower is better', type: 'line', fmt: (v) => `${fmtInt(v)} bpm`, series: [series('Resting HR', M.restingHr, 'var(--series-1)')], rolling: rolling(days.map(M.restingHr)) },
+    { id: 'hrv', title: 'Heart rate variability', note: 'ms · dots are nights, the line is the 7-day average · higher is better', type: 'line', fmt: (v) => `${fmtInt(v)} ms`, series: [series('HRV', M.hrv, 'var(--series-1)')], rolling: rolling(days.map(M.hrv)) },
+  ];
+
+  const grid = h('div', { class: 'grid' });
+  for (const c of CHARTS) {
+    const hasData = c.series.some((s) => s.values.some(num));
+    const legend =
+      c.series.length > 1 || c.rolling
+        ? h(
+            'div',
+            { class: 'legend' },
+            ...c.series.map((s) => legendItem(c.rolling && c.type === 'line' ? `Daily ${s.label}` : s.label, s.color, c.type === 'line' && !c.rolling ? 'line' : 'rect')),
+            c.rolling ? legendItem('7-day average', c.type === 'line' ? c.series[0].color : 'var(--text-primary)') : null,
+          )
+        : null;
+    const body = !hasData
+      ? h('div', { class: 'empty-chart', text: 'No data in this range yet. Connect the source or wait for the next sync.' })
+      : state.tables.has(c.id)
+        ? dataTable(
+            ['Date', ...c.series.map((s) => s.label), ...(c.rolling ? ['7-day avg'] : [])],
+            [...days.keys()].reverse().map((i) => [fmtDateLong(dates[i]), ...c.series.map((s) => (num(s.values[i]) ? c.fmt(s.values[i]) : '–')), ...(c.rolling ? [num(c.rolling[i]) ? c.fmt(c.rolling[i]) : '–'] : [])]),
+          )
+        : deferDraw(h('div', { class: 'chart' }), (el) => timeChart(el, c, dates));
+    grid.append(h('section', { class: 'card' }, cardHead(c.title, c.note, c.id), hasData ? legend : null, body));
   }
 
-  // Interaction layer: nearest date under the pointer; arrow keys for keyboard users.
-  const overlay = el('rect', { x: m.left, y: m.top, width: iw, height: ih, fill: 'transparent' });
-  svg.append(overlay);
-  const markers = c.type === 'line' ? c.series.map((s) => {
-    const dot = el('circle', { r: 4, fill: s.color, stroke: 'var(--surface)', 'stroke-width': 2, visibility: 'hidden' });
-    svg.append(dot);
-    return dot;
-  }) : [];
-
-  let current = -1;
-  const show = (i, anchor) => {
-    current = i;
-    const x = cx(i);
-    crosshair.setAttribute('x1', x); crosshair.setAttribute('x2', x); crosshair.setAttribute('visibility', 'visible');
-    hoverBand.setAttribute('x', x - band / 2); hoverBand.setAttribute('visibility', 'visible');
-    markers.forEach((dot, si) => {
-      const v = vals[si][i];
-      if (typeof v === 'number') {
-        dot.setAttribute('cx', x); dot.setAttribute('cy', y(v)); dot.setAttribute('visibility', 'visible');
-      } else dot.setAttribute('visibility', 'hidden');
-    });
-    const rect = svg.getBoundingClientRect();
-    showTooltip(c, days[i], vals.map((v) => v[i]), anchor ?? rect.left + (x / W) * rect.width, rect.top);
-  };
-  const hide = () => {
-    current = -1;
-    crosshair.setAttribute('visibility', 'hidden');
-    hoverBand.setAttribute('visibility', 'hidden');
-    markers.forEach((d) => d.setAttribute('visibility', 'hidden'));
-    $('#tooltip').hidden = true;
-  };
-  svg.addEventListener('pointermove', (e) => {
-    const rect = svg.getBoundingClientRect();
-    const px = ((e.clientX - rect.left) / rect.width) * W;
-    const i = Math.max(0, Math.min(n - 1, Math.floor((px - m.left) / band)));
-    show(i, e.clientX);
-  });
-  svg.addEventListener('pointerleave', hide);
-  svg.addEventListener('blur', hide);
-  svg.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    e.preventDefault();
-    const next = current < 0 ? n - 1 : Math.max(0, Math.min(n - 1, current + (e.key === 'ArrowRight' ? 1 : -1)));
-    show(next);
-  });
-
-  holder.replaceChildren(svg);
-}
-
-/** Bar with rounded data-end, square at the baseline. */
-function barPath(x, y, w, h, r) {
-  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
-}
-
-function showTooltip(c, day, values, clientX, top) {
-  const tip = $('#tooltip');
-  tip.replaceChildren();
-  const date = document.createElement('div');
-  date.className = 't-date';
-  date.textContent = fmtDateLong(day.date);
-  tip.append(date);
-  c.series.forEach((s, si) => {
-    const row = document.createElement('div');
-    row.className = 't-row';
-    const key = document.createElement('i');
-    key.className = 'key-line';
-    key.style.background = s.color;
-    const val = document.createElement('strong');
-    val.textContent = typeof values[si] === 'number' ? c.fmt(values[si]) : '–';
-    const label = document.createElement('span');
-    label.textContent = s.label;
-    row.append(key, val, label);
-    tip.append(row);
-  });
-  if (c.type === 'stack') {
-    const total = values.reduce((a, v) => a + (v ?? 0), 0);
-    const row = document.createElement('div');
-    row.className = 't-row';
-    const val = document.createElement('strong');
-    val.textContent = c.fmt(total);
-    const label = document.createElement('span');
-    label.textContent = 'Total';
-    const spacer = document.createElement('i');
-    spacer.className = 'key-line';
-    row.append(spacer, val, label);
-    tip.append(row);
+  const acts = h('table', { class: 'data' });
+  const ah = acts.createTHead().insertRow();
+  ['Date', 'Activity', 'Duration', 'Distance', 'Calories', 'Avg HR'].forEach((t, i) => ah.append(h('th', { class: i > 1 ? 'num' : null, text: t })));
+  const ab = acts.createTBody();
+  const inRange = activities.filter((a) => a.start.slice(0, 10) >= dates[0]);
+  if (!inRange.length) ab.insertRow().append(h('td', { colspan: '6', class: 'muted', text: 'No activities in this range.' }));
+  for (const a of inRange) {
+    const tr = ab.insertRow();
+    tr.append(h('td', { text: fmtDateLong(a.start.slice(0, 10)) }), h('td', { text: a.name }));
+    for (const [v, f] of [[a.durationS, fmtDur], [a.distanceM, fmtKm], [a.calories, fmtInt], [a.avgHr, fmtInt]]) tr.append(h('td', { class: 'num', text: f(v) }));
   }
-  tip.hidden = false;
-  // Right of the pointer, flipping left near the viewport edge.
-  const tw = tip.offsetWidth;
-  const left = clientX + 14 + tw > window.innerWidth - 8 ? clientX - 14 - tw : clientX + 14;
-  tip.style.left = `${Math.max(8, left)}px`;
-  tip.style.top = `${Math.max(8, top + 8)}px`;
+
+  $('#panel-trends').replaceChildren(grid, card('Recent activities', 'Garmin', h('div', { class: 'table-wrap' }, acts)));
 }
 
-// ── Activities ────────────────────────────────────────────
-function renderActivities(acts) {
-  const body = $('#activities tbody');
-  body.replaceChildren();
-  if (!acts.length) {
-    const row = body.insertRow();
-    const cell = row.insertCell();
-    cell.colSpan = 6;
-    cell.className = 'muted';
-    cell.textContent = 'No activities in this range.';
+// ── Shell: tabs, goals, loading, live updates ─────────────
+function isoToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+const goalsOf = (data) => ({ ...DEFAULT_GOALS, ...data.goals });
+
+function render() {
+  for (const t of TABS) {
+    const on = t === state.tab;
+    $(`#tab-${t}`).setAttribute('aria-selected', String(on));
+    $(`#tab-${t}`).tabIndex = on ? 0 : -1;
+    $(`#panel-${t}`).hidden = !on;
+  }
+  // The range picker scopes only the views it applies to; the others say what they cover.
+  $('#range-wrap').hidden = !(state.tab === 'habits' || state.tab === 'trends');
+  $('#scope-note').textContent =
+    state.tab === 'today' ? 'Today, against your goals and your 30-day baseline' : state.tab === 'insights' ? `Patterns from your last ${HISTORY_DAYS} days` : '';
+
+  const data = state.data;
+  if (!data) return;
+  const all = denseDays(data);
+  const goals = goalsOf(data);
+  const ranged = all.slice(-state.range);
+  renderSources(data.sources);
+  $('#sync').disabled = data.sources.some((s) => s.syncing);
+
+  if (state.tab === 'today') renderToday(all, goals);
+  else if (state.tab === 'habits') renderHabits(ranged, goals);
+  else if (state.tab === 'insights') renderInsights(all, goals);
+  else renderTrends(ranged, goals, data.activities);
+  renderLive();
+}
+
+function setTab(tab, focus = false) {
+  state.tab = tab;
+  storageSet('dash.tab', tab);
+  try {
+    history.replaceState(null, '', `#${tab}`);
+  } catch {
+    /* sandboxed frame */
+  }
+  render();
+  if (focus) $(`#tab-${tab}`).focus();
+}
+
+for (const t of TABS) $(`#tab-${t}`).addEventListener('click', () => setTab(t));
+$('.tabs').addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const i = TABS.indexOf(state.tab);
+  setTab(TABS[(i + (e.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length], true);
+});
+
+// Goals editor
+function fillGoals(goals) {
+  $('#g-sleep').value = String(goals.sleepMin / 60);
+  $('#g-bedtime').value = fmtClock(goals.bedtimeMin);
+  $('#g-steps').value = String(goals.steps);
+  $('#g-protein').value = String(goals.protein);
+  $('#g-calories').value = String(goals.calories);
+  $('#g-tol').value = String(goals.calorieTolerancePct);
+  $('#g-intensity').value = String(goals.intensityWeekly);
+}
+function toggleGoals(open) {
+  $('#goals-panel').hidden = !open;
+  $('#goals-toggle').setAttribute('aria-expanded', String(open));
+  if (open && state.data) {
+    fillGoals(goalsOf(state.data));
+    $('#g-sleep').focus();
+  }
+}
+$('#goals-toggle').addEventListener('click', () => toggleGoals($('#goals-panel').hidden));
+$('#goals-cancel').addEventListener('click', () => toggleGoals(false));
+$('#goals-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const [hh, mm] = $('#g-bedtime').value.split(':').map(Number);
+  const goals = {
+    sleepMin: Math.round(Number($('#g-sleep').value) * 60),
+    bedtimeMin: hh >= 12 ? hh * 60 + mm - 1440 : hh * 60 + mm,
+    steps: Number($('#g-steps').value),
+    protein: Number($('#g-protein').value),
+    calories: Number($('#g-calories').value),
+    calorieTolerancePct: Number($('#g-tol').value),
+    intensityWeekly: Number($('#g-intensity').value),
+  };
+  const res = await fetch('/api/goals', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(goals) }).catch(() => null);
+  if (!res?.ok) {
+    const body = res ? await res.json().catch(() => ({})) : {};
+    notify(`Goals not saved: ${body.error ?? 'the server could not be reached'}`);
     return;
   }
-  for (const a of acts) {
-    const row = body.insertRow();
-    row.insertCell().textContent = fmtDateLong(a.start.slice(0, 10));
-    row.insertCell().textContent = a.name;
-    for (const [v, f] of [[a.durationS, fmtDur], [a.distanceM, fmtKm], [a.calories, fmtInt], [a.avgHr, fmtInt]]) {
-      const cell = row.insertCell();
-      cell.className = 'num';
-      cell.textContent = f(v);
-    }
-  }
-}
+  state.data.goals = await res.json();
+  toggleGoals(false);
+  notify('Goals saved');
+  render();
+});
 
-// ── Data loading & live updates ───────────────────────────
 let inflight = null;
-async function load() {
+function load() {
   if (inflight) return inflight;
   $('#main').classList.add('loading');
-  inflight = fetch(`/api/dashboard?days=${state.days}`)
+  inflight = fetch(`/api/dashboard?days=${HISTORY_DAYS}`)
     .then((r) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
@@ -597,7 +665,7 @@ async function load() {
       render();
     })
     .catch((err) => {
-      $('#live-text').textContent = `Couldn't load data (${err.message}) — retrying`;
+      $('#live-text').textContent = `Couldn't load data (${err.message}). Retrying`;
     })
     .finally(() => {
       inflight = null;
@@ -606,21 +674,8 @@ async function load() {
   return inflight;
 }
 
-function render() {
-  const data = state.data;
-  if (!data) return;
-  const days = denseDays(data);
-  renderSources(data.sources);
-  renderTiles(days);
-  renderCharts(days);
-  renderActivities(data.activities);
-  $('#sync').disabled = data.sources.some((s) => s.syncing);
-  renderLive();
-}
-
 function renderLive() {
-  const dot = $('.live-dot');
-  dot.classList.toggle('on', state.live);
+  $('.live-dot').classList.toggle('on', state.live);
   const age = state.lastFetch ? fmtAgo(new Date(state.lastFetch).toISOString()) : '—';
   $('#live-text').textContent = state.live ? `Live · updated ${age}` : `Reconnecting… · updated ${age}`;
 }
@@ -628,19 +683,26 @@ function renderLive() {
 let debounce;
 function connectStream() {
   const es = new EventSource('/api/stream');
-  es.addEventListener('open', () => { state.live = true; renderLive(); load(); });
-  es.addEventListener('error', () => { state.live = false; renderLive(); });
+  es.addEventListener('open', () => {
+    state.live = true;
+    renderLive();
+    load();
+  });
+  es.addEventListener('error', () => {
+    state.live = false;
+    renderLive();
+  });
   es.addEventListener('update', () => {
     clearTimeout(debounce);
     debounce = setTimeout(load, 300);
   });
 }
 
-$('#range').value = String(state.days);
+$('#range').value = String(state.range);
 $('#range').addEventListener('change', (e) => {
-  state.days = Number(e.target.value);
-  localStorageSet('dash.range', state.days);
-  load();
+  state.range = Number(e.target.value);
+  storageSet('dash.range', String(state.range));
+  render();
 });
 
 $('#sync').addEventListener('click', async () => {
@@ -663,18 +725,26 @@ function notify(text) {
   n.textContent = `· ${text}`;
   n.hidden = false;
   clearTimeout(noticeTimer);
-  noticeTimer = setTimeout(() => { n.hidden = true; }, 8000);
+  noticeTimer = setTimeout(() => {
+    n.hidden = true;
+  }, 8000);
 }
 
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => state.data && renderCharts(denseDays(state.data)), 150);
+  resizeTimer = setTimeout(render, 150);
 });
 
 // Relative times tick; a slow poll backs up the stream in case a proxy drops it.
-setInterval(() => { renderLive(); state.data && renderSources(state.data.sources); }, 15_000);
-setInterval(() => { if (Date.now() - state.lastFetch > 5 * 60_000) load(); }, 60_000);
+setInterval(() => {
+  renderLive();
+  if (state.data) renderSources(state.data.sources);
+}, 15_000);
+setInterval(() => {
+  if (Date.now() - state.lastFetch > 5 * 60_000) load();
+}, 60_000);
 
+render();
 load();
 connectStream();

@@ -3,14 +3,20 @@
 A self-hosted dashboard that pulls nutrition, sleep, recovery, and activity data
 from your three services on a schedule and updates the page live (no refresh).
 
-- **Today tiles**: sleep score, readiness, steps, calories eaten vs goal, calories
-  burned, resting HR, HRV, Body Battery, each with a 14-day sparkline and a
-  comparison to your 7-day average
-- **Trends**: sleep & readiness, energy balance (eaten vs burned), macros, steps,
-  sleep stages, resting HR, HRV. Hover or use the arrow keys for values; every
-  chart has a table view.
-- **Recent Garmin activities**
-- **Source status**: last sync, next sync, and the exact error when a connection fails
+It is built to help you move the numbers, not just show them. There are four views:
+
+- **Today**: up to four suggestions for the day (for example "2,100 steps behind pace", "Make today an easy day",
+  "Bedtime is drifting later"), progress bars toward each goal with a pace marker
+  for the time of day, and recovery signals against your 30-day baseline.
+- **Habits**: a grid of which goals you hit each day, with hit rate and streaks, plus
+  each night's bedtime and wake time against your target bedtime.
+- **Insights**: next-morning readiness, sleep score or HRV on days with each habit
+  compared with days without it (late nights, hard training, 10K steps, protein,
+  overeating). Also a week-in-review table and your running calorie surplus or deficit.
+- **Trends**: daily charts with 7-day averages and goal lines, plus recent Garmin activities.
+
+Goals (sleep, bedtime, steps, protein, calories, weekly intensity minutes) are
+editable from the **Goals** button and saved on the server.
 
 ## How the auto-updating works
 
@@ -82,7 +88,7 @@ See [`.env.example`](./.env.example). Key settings:
 |---|---|---|
 | `DASHBOARD_PASSWORD` | – | HTTP basic-auth password. **Set this** whenever the dashboard is reachable from outside your machine: it shows health data. |
 | `DATA_DIR` | `./data` | JSON store for synced data and refreshed tokens (file mode 600) |
-| `BACKFILL_DAYS` / `RESYNC_DAYS` | 30 / 3 | History fetched on startup / days re-fetched on each sync |
+| `BACKFILL_DAYS` / `RESYNC_DAYS` | 90 / 3 | History fetched on startup / days re-fetched on each sync |
 | `*_SYNC_MINUTES` | 30 / 15 / 10 | Sync interval per source |
 
 ## Deploying
@@ -100,7 +106,8 @@ and lose saved tokens. A small always-on VM or a paid instance with a disk works
 
 | Method | Path | |
 |---|---|---|
-| GET | `/api/dashboard?days=30` | Days, activities, source status |
+| GET | `/api/dashboard?days=90` | Days, activities, source status, goals |
+| GET / PUT | `/api/goals` | Read or replace your goals |
 | GET | `/api/stream` | Server-sent `update` events |
 | POST | `/api/sync` | `{"source":"oura"\|"garmin"\|"mfp"}` or `{}` for all |
 | POST | `/api/import/mfp` | MyFitnessPal CSV body (`Content-Type: text/csv`) |
@@ -109,6 +116,6 @@ and lose saved tokens. A small always-on VM or a paid instance with a disk works
 ## Tests
 
 ```bash
-pnpm --filter @mealwise/dashboard test        # parsers & mappers
+pnpm --filter @mealwise/dashboard test        # parsers, mappers and insight maths
 pnpm --filter @mealwise/dashboard typecheck
 ```
