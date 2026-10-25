@@ -4,7 +4,7 @@ A self-hosted dashboard that pulls nutrition, sleep, recovery, and activity data
 from your three services on a schedule and updates the page live (no refresh).
 
 It is built to help you move the numbers, not just show them. The design follows
-the UX research in [`reports/Health dashboard UX and Oura design.md`](../../reports/Health%20dashboard%20UX%20and%20Oura%20design.md):
+the UX research in [`docs/research/Health dashboard UX and Oura design.md`](docs/research/Health%20dashboard%20UX%20and%20Oura%20design.md):
 compare yourself with your own usual range, forgive missed days, show how sure
 each insight is, and turn insights into small experiments.
 
@@ -51,11 +51,11 @@ This takes about 20 minutes. You need a [Railway](https://railway.com) account (
 an active Oura Membership (Oura's API requires it), and your Garmin and MyFitnessPal logins.
 
 ### 1. Deploy to Railway
-1. In Railway, choose **New Project → Deploy from GitHub repo** and pick `aidoogle01/meals.ai`.
+1. In Railway, choose **New Project → Deploy from GitHub repo** and pick `aidoogle01/health-dashboard`.
 2. Open the new service's **Settings**:
-   - **Source → Branch**: the branch this code is on (`main` once merged).
-   - **Config-as-code → Railway config file**: `/apps/dashboard/railway.json`.
-     This makes Railway build `apps/dashboard/Dockerfile` from the repo root.
+   - **Source → Branch**: `main`.
+   - **Config-as-code → Railway config file**: `/railway.json`.
+     This makes Railway build the `Dockerfile` in the repo root.
 3. **Add a volume** (right-click the service, or ⌘K → "Volume") and mount it at **`/data`**.
    This is where your synced data and sign-in sessions live; without it every redeploy forgets them.
 4. **Settings → Networking → Generate Domain**. Copy the address, e.g. `https://meals-dashboard.up.railway.app`.
@@ -95,10 +95,10 @@ If it blocks your server, use **Import MFP CSV** with the export from MyFitnessP
 
 ### Run it on your own computer instead
 ```bash
-pnpm install --filter @mealwise/dashboard
-python3 -m venv .venv && .venv/bin/pip install -r apps/dashboard/connectors/requirements.txt
-cp apps/dashboard/.env.example apps/dashboard/.env   # set DASHBOARD_PASSWORD and the Oura app keys
-cd apps/dashboard && PYTHON_BIN=../../.venv/bin/python node --env-file=.env --import tsx src/index.ts
+npm install
+python3 -m venv .venv && .venv/bin/pip install -r connectors/requirements.txt
+cp .env.example .env   # set DASHBOARD_PASSWORD and the Oura app keys
+PYTHON_BIN=.venv/bin/python node --env-file=.env --import tsx src/index.ts
 # open http://localhost:3100 (Oura redirect URI: http://localhost:3100/auth/oura/callback)
 ```
 
@@ -116,8 +116,8 @@ See [`.env.example`](./.env.example). Key settings:
 ## Deploying
 
 ```bash
-docker build -f apps/dashboard/Dockerfile -t health-dashboard .
-docker run -p 3100:3100 --env-file apps/dashboard/.env -v dashboard-data:/data health-dashboard
+docker build -t health-dashboard .
+docker run -p 3100:3100 --env-file .env -v dashboard-data:/data health-dashboard
 ```
 
 It must run on a host that **stays on**, with a **persistent disk** mounted at
@@ -144,6 +144,6 @@ and lose saved sign-ins. See "Set up your real data" above for Railway.
 ## Tests
 
 ```bash
-pnpm --filter @mealwise/dashboard test        # parsers, mappers and insight maths
-pnpm --filter @mealwise/dashboard typecheck
+npm test        # parsers, mappers and insight maths
+npm run typecheck
 ```
